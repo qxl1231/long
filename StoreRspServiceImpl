@@ -1,0 +1,1386 @@
+package com.intel.store.service;
+
+import com.google.common.base.Function;
+import com.google.common.base.Joiner;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
+import com.intel.store.SMSsender.SendSMSUtils;
+import com.intel.store.common.*;
+import com.intel.store.dao.BaseDao;
+import com.intel.store.exception.OperateFailureException;
+import com.intel.store.service.Interface.EhcacheService;
+import com.intel.store.service.Interface.StoreRspService;
+import com.intel.store.service.Interface.StoreService;
+import org.apache.commons.lang.StringUtils;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.rmi.RemoteException;
+import java.sql.SQLException;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+
+/**
+ * Created with qiangxiaolong
+ * User: P0031372
+ * Date: 13-8-10
+ * Time: 下午7:02.
+ */
+public class StoreRspServiceImpl implements StoreRspService {
+    private static Logger logger = LoggerFactory.getLogger(StoreRspServiceImpl.class);
+
+    /**
+     * 锁，用来控制并发
+     */
+    private Lock lock = new ReentrantLock();
+
+    private BaseDao baseDao;
+
+    private StoreService storeService;
+
+    private EhcacheService ehcacheService;
+
+    public void setBaseDao(BaseDao baseDao) {
+        this.baseDao = baseDao;
+    }
+
+    public void setStoreService(StoreService storeService) {
+        this.storeService = storeService;
+    }
+
+    public void setEhcacheService(EhcacheService ehcacheService) {
+        this.ehcacheService = ehcacheService;
+    }
+
+    /**
+     * 根据用户名密码查询用户
+     *
+     * @param username
+     * @param password
+     * @return
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public JSONObject findByNamePwd(String username, String password, String imei, String android_id) throws JSONException {
+        String sql = new StringBuilder("select distinct a.rep_id as rep_id, a.rep_asgn_role_id,")
+                .append(" a.rep_nm as rep_nm, ")
+                .append(" rep_asgn_role_nm,a.rep_tel,")
+                .append(" a.rep_email, a.rep_gvrnmt_id,")
+                .append(" a.auth as auth")
+                .append(" from external_v_stor_rep_lst a")
+                .append(" where a.rep_tel =? and a.log_pwd=?")
+                .append(" and a.rep_asgn_role_id in(1,2) and a.rec_sts_id=1").toString();
+        logger.info(sql);
+        List<SerializableJSONObject> resultList = this.baseDao.sqlQueryResult4Cache(
+                sql, new Object[]{username, RC2Encryptor.toByte(RC2Encryptor.encrypt(password))});
+        if (resultList == null || resultList.size() == 0) {
+            throw new OperateFailureException("用户名或密码错误！");
+        }
+        JSONObject rsp = this.chooseLoginUser(resultList, null);
+
+        System.out.println(rsp.get("rep_asgn_role_id"));
+        System.out.println(rsp.get("rep_asgn_role_id").toString().equals(String.valueOf(Consts.RSP_CLERK_ROLE)));
+        if (rsp.get("rep_asgn_role_id") != null && rsp.get("rep_asgn_role_id").toString().equals(String.valueOf(Consts.RSP_CLERK_ROLE))) {//当前用户为rsp店员
+            if (rsp.get("auth") == null || rsp.get("auth").toString().equals("0")) {//店员资质未认证
+                throw new OperateFailureException("该店员尚未认证，不能登录，请联系店长认证！");
+            }
+        }
+
+        //记录登陆信息
+        this.saveLoginInfo(rsp, imei, android_id);
+        String sessionId = EncryptionUtil.encryptByMD5(username
+                + new SimpleDateFormat("yyMMddHHmmsssss").format(new Date()));
+        //保存session信息
+        rsp.put("sessionId", sessionId);
+        this.storeService.saveSessionInfo(sessionId);
+        return rsp;
+    }
+
+    /**
+     * 根据登陆名查询用户，当用户名重复时，选择逻辑和登陆一致
+     *
+     * @param username
+     * @return
+     * @throws JSONException
+     */
+    public JSONObject findByName(String username) throws JSONException {
+        String sql = new StringBuilder("select distinct a.rep_id as rep_id, a.rep_asgn_role_id,")
+                .append(" a.rep_nm as rep_nm, ")
+                .append(" rep_asgn_role_nm,a.rep_tel,")
+                .append(" a.rep_email, a.rep_gvrnmt_id")
+                .append(" from external_v_stor_rep_lst a")
+                .append(" where a.rep_tel =?")
+                .append(" and a.rep_asgn_role_id in(1,2) and a.rec_sts_id=1").toString();
+        logger.info(sql);
+        List<SerializableJSONObject> resultList = this.baseDao.sqlQueryResult4Cache(
+                sql, new Object[]{username});
+        if (resultList == null || resultList.size() == 0) {
+            throw new OperateFailureException("不存在此用户！");
+        }
+        return this.chooseLoginUser(resultList, "此用户为不可登陆用户!");
+    }
+
+    /**
+     * 从多个User中选取作为当前登录人（同一账号）,
+     * （此方法的主要sql可以与登录查询合并，没有合并的原因是， 系统中重复账号占系统所有账号的比例不是很高，
+     * 如果均去查询有没有门店会消耗过多性能）
+     *
+     * @param userList
+     * @return
+     */
+    private SerializableJSONObject chooseLoginUser(List<SerializableJSONObject> userList, String noUserMsg) throws JSONException {
+        List<Integer> rspIdList = Lists.transform(userList, new Function<SerializableJSONObject, Integer>() {
+            @Override
+            public Integer apply(SerializableJSONObject jsonObject) {
+                if (Objects.equals(jsonObject, null) || Objects.equals(jsonObject.get("rep_id"), null)) {
+                    return -1;
+                }
+                return (Integer) jsonObject.get("rep_id");
+            }
+        });
+        //获取有门店的rsp对应的角色
+        List<SerializableJSONObject> rspRoleList = this.listRspRole(rspIdList);
+        //把角色包装到对应的对象里去
+        List<SerializableJSONObject> result = Lists.newArrayList();
+        Joiner joiner = Joiner.on(",");
+        for (SerializableJSONObject user : userList) {
+            Set<Integer> roleSet = Sets.newHashSet();
+            for (SerializableJSONObject rspRole : rspRoleList) {
+                if (Objects.equals(rspRole.get("rep_id"), user.get("rep_id"))) {
+                    roleSet.add(Integer.valueOf((String) rspRole.get("role_nm")));
+                }
+            }
+            //rsp关联了diy或oem门店
+            if (roleSet.size() > 0) {
+                user.put("role_id_str", joiner.join(roleSet));
+                result.add(user);
+            }
+        }
+        if (result.size() == 0) {//所有的账号均没有门店，则默认返回第一个
+            throw new OperateFailureException(StringUtils.isBlank(noUserMsg) ? "你没有登录角色，不能登录！" : noUserMsg);
+        }
+        //返回多个有门店账号的第一个
+        return result.get(0);
+    }
+
+    /**
+     * 返回有管理门店的rspId集合
+     *
+     * @param rspIdList
+     * @return
+     */
+    private List<SerializableJSONObject> listHasStoreRsp(List<Integer> rspIdList) {
+        String rspIdStr = Joiner.on(",").join(rspIdList);
+        String sql = new StringBuilder("select distinct x.rep_id as rep_id, x.rep_asgn_role_id,")
+                .append(" x.rep_nm as rep_nm, ")
+                .append(" x.rep_asgn_role_nm, x.rep_tel,")
+                .append(" x.rep_email, x.rep_gvrnmt_id")
+                .append(" from external_v_stor_rep_lst x")
+                .append(" where x.rep_asgn_role_id in (1,2) and x.rec_sts_id=1")
+                .append(" and x.rep_id in (").append(rspIdStr).append(")")
+                .append(" and EXISTS (SELECT 1 FROM external_v_diy_stor_lst_mbl a")
+                .append(" LEFT JOIN prc_v_citytype_new m ON a.city_id = m.city_id")
+                .append(" AND m.yyyyqq ='").append(QuarterUtil.getCurrentQuarter()).append("'")
+                .append(" WHERE a.stor_id = x.stor_id")
+                .append(" union ")
+                .append(" SELECT 1 FROM  external_v_xoem_stor_lst_mbl a,")
+                .append(" external_v_slsprs_city_asgn c WHERE")
+                .append(" a.[Intel Store ID] = x.stor_id ")
+                .append(" AND a.[City ID] = c.city_id AND a.Category = 'High Touch')").toString();
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult4Cache(sql);
+    }
+
+    /**
+     * 查询rsp的角色
+     *
+     * @param rspIdList
+     * @return
+     */
+    private List<SerializableJSONObject> listRspRole(List<Integer> rspIdList) {
+        String rspIdStr = Joiner.on(",").join(rspIdList);
+        String sql = new StringBuilder("SELECT c.rep_id as rep_id, '77' as role_nm")
+                .append(" FROM external_v_diy_stor_lst_mbl a ")
+                .append(" LEFT JOIN prc_v_citytype_new m ON a.city_id = m.city_id")
+                .append(" AND m.yyyyqq = '").append(QuarterUtil.getCurrentQuarter()).append("',")
+                .append(" external_v_stor_rep_lst c")
+                .append(" WHERE a.stor_id = c.stor_id")
+                .append(" and c.rep_id in (").append(rspIdStr).append(")")
+                .append(" UNION")
+                .append(" SELECT d.rep_id as rep_id, '78' as role_nm")
+                .append(" FROM external_v_xoem_stor_lst_mbl a,")
+                .append(" external_v_slsprs_city_asgn c, external_v_stor_rep_lst d")
+                .append(" WHERE a.[Intel Store ID] = d.stor_id")
+                .append(" AND a.[City ID] = c.city_id ")
+                .append(" AND a.Category = 'High Touch'")
+                .append(" and d.rep_id in (").append(rspIdStr).append(")").toString();
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult4Cache(sql);
+    }
+
+    /**
+     * 记录rsp登陆信息
+     *
+     * @param rsp
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void saveLoginInfo(JSONObject rsp, String imei, String android_id) throws JSONException {
+        if (rsp == null || rsp.get("rep_id") == null || rsp.get("rep_nm") == null) {
+            throw new OperateFailureException("用户信息不完整！");
+        }
+        String sql = new StringBuilder("insert into prc_rsp_mbl_log_hist(rep_id,")
+                .append(" last_upd_dtm, cmmt,imei,android_id) values(?, GETDATE(), ?,?,?)").toString();
+        logger.info(sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{Integer.valueOf(rsp.get("rep_id").toString()),
+                rsp.get("rep_id").toString() + "|" + rsp.get("rep_nm"), imei, android_id});
+    }
+
+    /**
+     * 删除Rsp
+     *
+     * @param operate_rsp_id
+     * @param rsp_id
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void deleteRsp(String operate_rsp_id, String rsp_id) {
+        //验证被删除Rsp是否属于当前Rsp
+        if (!checkRspRelation(operate_rsp_id, rsp_id)) {
+            throw new OperateFailureException("被删除店员不属于您管理，你不能删除！");
+        }
+        //删除店员和门店的管理关系（非物理删除）
+        this.deleteRspStoreRelation(rsp_id);
+        this.recordRspStoreRelationHist(rsp_id);
+        //删除店员（非物理删除）
+        this.deleteRsp(rsp_id);
+        this.recordRspHist(rsp_id);
+    }
+
+    /**
+     * 删除店员和门店的管理关系（非物理删除）
+     *
+     * @param rsp_id
+     */
+    private void deleteRspStoreRelation(String rsp_id) {
+        String sql = new StringBuilder("update stdb_stor_rep_reltn")
+                .append(" set rec_sts_id = -1, last_upd_dtm = GETDATE()")
+                .append(" where rep_id = ? and  rec_sts_id = 1").toString();
+        logger.info(sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{rsp_id});
+    }
+
+    /**
+     * 记录已删除店员和门店的管理关系
+     *
+     * @param rsp_id
+     */
+    private void recordRspStoreRelationHist(String rsp_id) {
+        String sql = new StringBuilder("insert into Stdb_stor_rep_reltn_hist (hist_type, his_dtm,")
+                .append(" stor_id, rep_id, strt_dt, end_date, last_upd_usr_id, last_upd_dtm,")
+                .append(" rep_asgn_role_id, rec_sts_id, key_rep_flg)")
+                .append(" select 2 as hist_type, GETDATE() as hist_dtm, stor_id, rep_id, strt_dt, end_date, last_upd_usr_id, last_upd_dtm,")
+                .append(" rep_asgn_role_id, rec_sts_id, key_rep_flg ")
+                .append(" from Stdb_stor_rep_reltn where rep_id = ?").toString();
+        logger.info(sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{rsp_id});
+    }
+
+    /**
+     * 删除店员（非物理删除）
+     *
+     * @param rsp_id
+     */
+    private void deleteRsp(String rsp_id) {
+        String sql = new StringBuilder("update stdb_store_rep set rec_sts_id = -1")
+                .append(" where rep_id =?").toString();
+        logger.info(sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{rsp_id});
+    }
+
+    /**
+     * 记录已删除店员
+     *
+     * @param rsp_id
+     */
+    private void recordRspHist(String rsp_id) {
+        String sql = new StringBuilder("insert into Stdb_store_rep_hist (hist_type, hist_dtm, rep_id, rep_nm, ")
+                .append(" rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, new_rep_id)")
+                .append(" select 2 as hist_type, GETDATE() as hist_dtm, rep_id, rep_nm, rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, null as new_rep_id from Stdb_store_rep where rep_id = ?").toString();
+        logger.info(sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{rsp_id});
+    }
+
+    /**
+     * 验证Rsp之间是否是上下级关系
+     *
+     * @param operate_rsp_id
+     * @param rsp_id
+     * @return
+     */
+    public boolean checkRspRelation(String operate_rsp_id, String rsp_id) {
+        String sql = new StringBuilder("select 1 from  external_v_stor_rep_lst a1,")
+                .append(" external_v_stor_rep_lst a2")
+                .append(" where a1.rep_id =?  and a1.rep_asgn_role_id = 1 and a1.rec_sts_id = 1")
+                .append(" and a2.rep_id =? and a2.rep_asgn_role_id = 2 and a2.rec_sts_id = 1")
+                .append(" and a1.stor_id = a2.stor_id").toString();
+        logger.info(sql);
+        List<JSONObject> resultList = this.baseDao.sqlQueryResult(sql, new Object[]{operate_rsp_id, rsp_id});
+        if (resultList == null || resultList.size() == 0) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 根据店长Id查询店长管理的店员
+     *
+     * @param stor_id
+     * @return
+     */
+    public List<JSONObject> listRsp(String stor_id, String rep_asgn_role_id_str) {
+        // qxl 7.28.2014
+        StringBuilder sql = new StringBuilder("select distinct a2.rep_id, a2.rep_asgn_role_id,a2.city_id,")
+                .append(" a2.rep_asgn_role_nm, a2.rep_nm, a2.rep_tel, a2.rep_email, a2.rep_gvrnmt_id,a2.auth")
+                .append(" from  external_v_stor_rep_lst a2")
+                .append(" where  a2.rep_asgn_role_id in (")
+                .append(rep_asgn_role_id_str)
+                .append(") and a2.rec_sts_id = 1 ")
+                .append(" and a2.stor_id = ?");
+
+        logger.info(sql.toString());
+        return this.baseDao.sqlQueryResult(sql.toString(), new Object[]{stor_id});
+    }
+
+    /**
+     * 根据rspId查询门店
+     *
+     * @param rsp_id
+     * @return
+     */
+    public List<SerializableJSONObject> listRspStore(String rsp_id) {
+        return this.ehcacheService.listRspStore(rsp_id);
+    }
+
+    /**
+     * 查询图片上传日期
+     *
+     * @param stor_id
+     * @return
+     */
+    @Override
+    public List<JSONObject> queryPicDateFile(String stor_id) {
+        String sql = new StringBuilder("select  DISTINCT CONVERT(varchar(100), a.last_upd_dtm, 112) ")
+                .append(" as last_upd_dtm, count(a.pic_id) as pic_count ")
+                .append(" from msp_stor_pic_rsp a ")
+                .append(" where a.last_upd_dtm>=DATEADD(mm,-6,GETDATE())")
+                .append(" AND a.stor_id=?")
+                .append(" group by CONVERT (VARCHAR (100),a.last_upd_dtm,112)")
+                .append(" ORDER BY last_upd_dtm DESC").toString();
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{stor_id});
+    }
+
+    /**
+     * 根据图片日期查询图片
+     *
+     * @param last_upd_dtm
+     * @return
+     */
+    public List<JSONObject> queryPicByDate(String last_upd_dtm, String stor_id) {
+        String sql = new StringBuilder("SELECT distinct b.pht_cat_nm as pht_cat_nm, a.pic_id as pic_id,")
+                .append(" a.stor_id as stor_id, a.wv_id as wv_id,")
+                .append(" a.pht_pth as pht_pth, a.pht_cat as pht_cat,")
+                .append(" a.last_upd_usr_id as last_upd_usr_id,")
+                .append(" a.cmnts as cmnts, a.last_upd_dtm as last_upd_dtm,")
+                .append("  c.rep_nm as last_upd_usr_nm")
+                .append(" FROM msp_stor_pic_rsp  a ")
+                .append(" LEFT JOIN dbo.msp_pht_cat b ON a.pht_cat=b.pht_cat, ")
+//                .append(" WHERE a.last_upd_usr_id = ?")
+                .append(" external_v_stor_rep_lst c WHERE a.last_upd_usr_id = c.rep_id")
+                .append(" AND a.last_upd_dtm>=DATEADD(mm,-6,GETDATE())")
+                .append(" AND CONVERT(varchar(100), a.last_upd_dtm, 112) = ?")
+                .append(" and a.stor_id=?")
+                .append(" ORDER BY a.last_upd_dtm desc").toString();
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{last_upd_dtm, stor_id});
+    }
+
+    /**
+     * 添加rsp
+     *
+     * @param rep_nm
+     * @param rep_tel
+     * @param rep_email
+     * @param last_upd_usr_id
+     * @param rep_bank_nm
+     * @param rep_bank_acct_nbr
+     * @param city_id
+     * @return
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void addRsp(String rep_nm, String rep_tel, String rep_email, String last_upd_usr_id,
+                       String rep_bank_nm, String rep_bank_acct_nbr, String city_id,
+                       String rep_gvrnmt_id, String rep_bank_city, String log_pwd,
+                       String stor_id) throws SQLException {
+        //验证登陆账号是否唯一
+        this.checkAccountUnique(rep_tel, null);
+        //新增店员个体
+        String sql = new StringBuilder("insert into stdb_store_rep(rep_nm, rep_tel, rep_email, rec_sts_id,")
+                .append(" last_upd_usr_id, last_upd_dtm, rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id,")
+                .append(" city_id, rep_bank_city, log_pwd, lastlogin) ")
+                .append(" values(?, ?, ?, 1, ?, GETDATE(), ?, ?, ?, ?, ?, ?, GETDATE())").toString();
+        //记录新增店员
+        String sql2 = new StringBuilder("insert into Stdb_store_rep_hist(hist_type, hist_dtm, rep_id, rep_nm, ")
+                .append(" rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, new_rep_id)")
+                .append("select 1 as hist_type, GETDATE() as hist_dtm, rep_id, rep_nm, rep_tel, rep_email, rec_sts_id, ")
+                .append(" last_upd_usr_id, last_upd_dtm,rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id,")
+                .append("rep_bank_city, log_pwd, lastlogin, null as new_rep_id from Stdb_store_rep where rep_id = ?").toString();
+        logger.info(sql);
+        logger.info(sql2);
+        Object primaryKey = this.baseDao.insertReturnPrimaryKey(sql, new Object[]{rep_nm, rep_tel, rep_email,
+                last_upd_usr_id, rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id,
+                city_id, rep_bank_city, RC2Encryptor.toByte(RC2Encryptor.encrypt(log_pwd))});
+        this.baseDao.insertReturnPrimaryKey(sql2, new Object[]{primaryKey});
+        //新增店员和门店的关联关系
+        String relationSql = new StringBuilder("insert into stdb_stor_rep_reltn(stor_id,rep_id,strt_dt,end_date,last_upd_usr_id,last_upd_dtm,")
+                .append("rep_asgn_role_id,rec_sts_id,key_rep_flg)")
+                .append(" values(?, ?, null, null, ?, GETDATE(), 2, 1, null)").toString();
+        //    h记录关联关系
+        String relationSql2 = new StringBuilder(" insert into Stdb_stor_rep_reltn_hist (hist_type, his_dtm,")
+                .append(" stor_id, rep_id, strt_dt, end_date, last_upd_usr_id, last_upd_dtm,")
+                .append(" rep_asgn_role_id, rec_sts_id, key_rep_flg)")
+                .append(" select 1 as hist_type, GETDATE() as hist_dtm, stor_id,rep_id,strt_dt,end_date,")
+                .append(" last_upd_usr_id,last_upd_dtm,rep_asgn_role_id,rec_sts_id,key_rep_flg from Stdb_stor_rep_reltn ")
+                .append(" where stor_id=? and last_upd_usr_id=?").toString();
+        logger.info(relationSql);
+        logger.info(relationSql2);
+        this.baseDao.executeDdlSql(relationSql, new Object[]{stor_id, primaryKey.toString(), last_upd_usr_id});
+        this.baseDao.executeDdlSql(relationSql2, new Object[]{stor_id, last_upd_usr_id});
+    }
+
+    /**
+     * 修改密码
+     *
+     * @param username
+     * @param password
+     * @param newPwd
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void modifyPwd(String username, String password, String newPwd, String imei, String android_id) throws JSONException {
+        JSONObject user = this.findByNamePwd(username, password, imei, android_id);
+        if (user.get("rep_id") == null) {
+            throw new OperateFailureException("该数据记录不包含rep_id字段！");
+        }
+        String userId = ((Integer) user.get("rep_id")).toString();
+        //更新密码
+        this.modifyPwd(userId, newPwd);
+    }
+
+    /**
+     * 根据rsp_id 修改rsp的密码
+     *
+     * @param rsp_id
+     * @param newPwd
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    private void modifyPwd(String rsp_id, String newPwd) {
+        //更新密码
+        String sql = new StringBuilder("update stdb_store_rep set log_pwd=?")
+                .append(" where rep_id = ?").toString();
+        logger.info(sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{RC2Encryptor.toByte(RC2Encryptor.encrypt(newPwd)), rsp_id});
+        //插入备份表
+        String sql2 = new StringBuilder("insert into Stdb_store_rep_hist(hist_type, hist_dtm, rep_id, rep_nm, ")
+                .append(" rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, new_rep_id)")
+                .append("select 1 as hist_type, GETDATE() as hist_dtm, rep_id, rep_nm, rep_tel, rep_email, rec_sts_id, ")
+                .append(" last_upd_usr_id, last_upd_dtm,rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id,")
+                .append("rep_bank_city, log_pwd, lastlogin, null as new_rep_id from Stdb_store_rep where rep_id = ?").toString();
+        this.baseDao.executeDdlSql(sql2, new Object[]{rsp_id});
+    }
+
+    /**
+     * 随机生成一个六位数的数字
+     *
+     * @return
+     */
+    private static int randomAccessPwd() {
+        String str = "";
+        str += (int) (Math.random() * 9 + 1);
+        for (int i = 0; i < 5; i++) {
+            str += (int) (Math.random() * 10);
+        }
+        int num = Integer.parseInt(str);
+        return num;
+    }
+
+    /**
+     * 根据rsp
+     *
+     * @param rsp_tel
+     * @return
+     */
+    private int findRspByTel(String rsp_tel) throws JSONException {
+        JSONObject jsonObject = this.findByName(rsp_tel);
+        return (Integer) jsonObject.get("rep_id");
+    }
+
+    /**
+     * pwd密码短信通知功能
+     *
+     * @param rsp_tel
+     */
+    @Override
+    public void pwdMsgValidate(String rsp_tel) throws JSONException {
+        //根据rsp_tel查找对应的rsp_id
+        int rsp_id = this.findRspByTel(rsp_tel);
+        //验证rsp当前发送的短信次数不超过三次
+        this.countSrMsgSend(rsp_id, Consts.PWD_FIND_TYPE_RSP);
+
+        String newPwd = pwdSearch(rsp_id);
+        //发送短信
+        try {
+            SendSMSUtils.sendMessg(rsp_tel, newPwd);
+        } catch (RemoteException e) {
+            throw new OperateFailureException("密码发送失败！");
+        }
+        //记录发短信
+        this.addMsgsendData("", "【英特尔零售宝】您在英特尔零售宝店面版上的登录用户名是:" + rsp_tel + ",密码是:"
+                + newPwd + "。客服电话:4008223686。", rsp_id, Consts.PWD_FIND_TYPE_RSP);
+    }
+
+    private String pwdSearch(int rsp_id) {
+        String sql = "SELECT * FROM external_v_stor_rep_lst WHERE rep_id=? and rec_sts_id = 1";
+        String result = this.baseDao.sqlUtils(sql, "log_pwd", new Object[]{rsp_id});
+        if (result == null) {
+            //生成新密码
+            String newPwd = String.valueOf(this.randomAccessPwd());
+            //修改密码
+            this.modifyPwd(String.valueOf(rsp_id), newPwd);
+            String sql2 = new StringBuilder("insert into Stdb_store_rep_hist (hist_type, hist_dtm, rep_id, rep_nm, ")
+                    .append(" rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                    .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                    .append(" rep_bank_city, log_pwd, lastlogin, new_rep_id)")
+                    .append("select 1 as hist_type, GETDATE() as hist_dtm, rep_id, rep_nm, rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm,")
+                    .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id,")
+                    .append(" rep_bank_city, log_pwd, lastlogin, null as new_rep_id from Stdb_store_rep where rep_id = ?").toString();
+            this.baseDao.executeDdlSql(sql2, new Object[]{rsp_id});
+            return newPwd;
+            //            throw new OperateFailureException("密码异常，请联系客服！");
+        }
+        return RC2Encryptor.decrypt(result);
+    }
+
+    /**
+     * 修改所有经理的密码
+     *
+     * @param newPwd
+     * @throws JSONException
+     */
+    public void modifyPwd(String newPwd) {
+        //更新密码
+        String sql = new StringBuilder("update stdb_store_rep set log_pwd=?")
+                .toString();
+        logger.info(sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{RC2Encryptor.toByte(RC2Encryptor.encrypt(newPwd))});
+    }
+
+    /**
+     * 验证rsp登陆账号是否存在，
+     * rep_id为可选参数，当rep_id不为空时，则排除rsp id为rep_id的rsp
+     *
+     * @param rep_tel
+     * @param rep_id
+     */
+    private void checkAccountUnique(String rep_tel, String rep_id) {
+        StringBuilder sql = new StringBuilder("select * from external_v_stor_rep_lst a")
+                .append(" where a.rep_tel= ? and a.rep_asgn_role_id in (1, 2)")
+                .append(" and a.rec_sts_id=1");
+        Object[] objArray = new Object[]{rep_tel};
+        if (!StringUtils.isBlank(rep_id)) {
+            sql.append(" and a.rep_id !=?");
+            objArray = new Object[]{rep_tel, rep_id};
+        }
+        logger.info(sql.toString());
+        List<JSONObject> resultList = this.baseDao.sqlQueryResult(sql.toString(), objArray);
+        if (resultList != null && resultList.size() > 0) {
+            throw new OperateFailureException("手机号码不能与别人的重复！");
+        }
+    }
+
+    /**
+     * 修改邮箱和电话
+     *
+     * @param rep_tel
+     * @param rep_email
+     * @param rep_id
+     * @param operate_id
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void modifyRsp(String rep_tel, String rep_email, String rep_id, String operate_id) {
+        //验证新的电话是否唯一
+        this.checkAccountUnique(rep_tel, rep_id);
+        //修改rsp邮箱和电话
+        String sql = new StringBuilder("update stdb_store_rep set rep_tel=?,")
+                .append(" rep_email=?, last_upd_usr_id=?, last_upd_dtm=GETDATE()")
+                .append("  where rep_id=?").toString();
+        logger.info(sql);
+        //插入intel想要的表
+        StringBuilder intelSql = new StringBuilder("insert into Stdb_store_rep_hist(hist_type, hist_dtm, rep_id, rep_nm,")
+                .append(" rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, new_rep_id)")
+                .append(" select 2 as hist_type, GETDATE() as hist_dtm, rep_id, rep_nm, rep_tel, rep_email,")
+                .append(" rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, null as new_rep_id from Stdb_store_rep where rep_id = ?");
+        this.baseDao.executeDdlSql(sql, new Object[]{rep_tel, rep_email, operate_id, rep_id});
+        logger.info(intelSql.toString());
+        this.baseDao.executeDdlSql(intelSql.toString(), new Object[]{rep_id});
+    }
+
+    @Override
+    public void addDiySaleData(String stor_id, String barcode, String rep_id, String pic_loc)
+            throws JSONException {
+        lock.lock();
+        try {
+            List<JSONObject> resultList = this.listRepeated("prc_diy_str_scan_data", "barcode", barcode);
+            if (resultList != null && resultList.size() > 0) {
+                SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd hh:mm:ss");
+                logger.info("条码为" + barcode + "的销量数据在"
+                        + sdf.format((Date) resultList.get(0).get("last_upd_dtm")) + "已经上传!");
+                throw new OperateFailureException("条码为" + barcode + "的销量数据在"
+                        + sdf.format((Date) resultList.get(0).get("last_upd_dtm")) + "已经上传!");
+            }
+            StringBuilder sql = new StringBuilder("insert prc_diy_str_scan_data")
+                    .append(" (stor_id, rep_id, last_upd_dtm, barcode, pic_loc)")
+                    .append(" values(?, ?, GETDATE(), ?, ?)");
+            logger.info(sql.toString());
+            this.baseDao.executeDdlSql(sql.toString(), new Object[]{Integer.valueOf(stor_id),
+                    Integer.valueOf(rep_id), barcode, pic_loc});
+        } finally {
+            lock.unlock();
+        }
+
+    }
+
+    @Override
+    public void newAddDiySaleData(String stor_id, String barcode, String rep_id, String pic_loc)
+            throws JSONException {
+        lock.lock();
+        try {
+            String sql = new StringBuilder("select distinct a.*, b.stor_nm, c.rep_tel, rep_nm")
+                    .append(" from prc_diy_str_scan_data a, external_v_diy_stor_lst_mbl b, external_v_stor_rep_lst c")
+                    .append(" where a.stor_id = b.stor_id and a.rep_id = c.rep_id")
+                    .append(" and a.barcode = ?").toString();
+            logger.info(sql);
+            List<SerializableJSONObject> jsonObjects = this.baseDao.sqlQueryResult4Cache(sql, new Object[]{barcode});
+            if (jsonObjects == null || jsonObjects.size() == 0) {
+                //物理上传销量上传销量
+                this.insertDiySaleData(stor_id, rep_id, barcode, pic_loc);
+            } else {
+                for (SerializableJSONObject jsonObject : jsonObjects) {
+                    if (jsonObject.get("stor_id") == null) {
+                        continue;
+                    }
+                    System.out.println(jsonObject.get("stor_id").toString().equals(stor_id));
+                    if (jsonObject.get("stor_id").toString().equals(stor_id)) {//在同一家门店下上传同一个barcode的销量，立即报错
+                        throw new OperateFailureException(convertToStr(jsonObject));
+                    }
+                }
+
+                //物理上传销量上传销量
+                this.insertDiySaleData(stor_id, rep_id, barcode, pic_loc);
+                //被其他门店上传，正常提示用户，此异常抛出后数据库不应回滚
+                throw new OperateFailureException(new StringBuilder("此笔销量已被").append(jsonObjects.size())
+                        .append("家门店上传，销量上传以第一次为准，如有异议，请保留质保卡和实物盒子，并联系客户处理!").toString(), "000002");
+            }
+
+        } finally {
+            lock.unlock();
+        }
+
+    }
+
+    /**
+     * 物理插入diy销量数据
+     *
+     * @param stor_id
+     * @param rep_id
+     * @param barcode
+     * @param pic_loc
+     */
+    private void insertDiySaleData(String stor_id, String rep_id, String barcode, String pic_loc) {
+        StringBuilder sql = new StringBuilder("insert prc_diy_str_scan_data")
+                .append(" (stor_id, rep_id, last_upd_dtm, barcode, pic_loc)")
+                .append(" values(?, ?, GETDATE(), ?, ?)");
+        logger.info(sql.toString());
+        this.baseDao.executeDdlSql(sql.toString(), new Object[]{Integer.valueOf(stor_id),
+                Integer.valueOf(rep_id), barcode, pic_loc});
+    }
+
+    /**
+     * 获取序列号重复描述
+     *
+     * @param jsonObject
+     * @return
+     * @throws JSONException
+     */
+    private String convertToStr(SerializableJSONObject jsonObject) throws JSONException {
+        String rep_nm = jsonObject.get("rep_nm") != null ? jsonObject.get("rep_nm").toString() : "";
+        String rep_tel = jsonObject.get("rep_tel") != null ? jsonObject.get("rep_tel").toString() : "";
+        Date uploadDate = jsonObject.get("last_upd_dtm") != null ? (Date) jsonObject.get("last_upd_dtm") : null;
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        StringBuilder message = new StringBuilder().append("手机号为").append(rep_tel)
+                .append("的店面销售人员")
+                .append(rep_nm);
+        if (uploadDate != null) {
+            message.append("于").append(sdf.format(uploadDate));
+        }
+        message.append("已经在该门店下上传了该销量，上传失败！");
+        return message.toString();
+    }
+
+    /**
+     * 上传oem销售数据
+     *
+     * @param stor_id
+     * @param barcode
+     * @param rep_id
+     * @param brand_id
+     * @param mdl_id
+     * @param pic_loc
+     */
+    public void addOemSaleData(String stor_id, String barcode, String rep_id,
+                               String brand_id, String mdl_id, String pic_loc) {
+        StringBuilder sql = new StringBuilder("insert prc_oem_str_scan_data")
+                .append(" (stor_id, rep_id, last_upd_dtm, brnd_id, ")
+                .append(" mdl_id,  barcode, pic_loc)")
+                .append(" values(?, ?, GETDATE(), ?, ?, ?, ?)");
+        logger.info(sql.toString());
+        this.baseDao.executeDdlSql(sql.toString(), new Object[]{Integer.valueOf(stor_id),
+                Integer.valueOf(rep_id), Integer.valueOf(brand_id),
+                Integer.valueOf(mdl_id), barcode, pic_loc});
+    }
+
+    /**
+     * 验证表中某个字段对应的值是否存在
+     *
+     * @param tableName
+     * @param attrName
+     * @param attrValue
+     */
+    private void checkRepeated(String tableName, String attrName, String attrValue, String repeatedMsg) {
+        String sql = new StringBuilder("select 1 from ")
+                .append(tableName)
+                .append(" a where a.").append(attrName)
+                .append(" = ?").toString();
+        List<JSONObject> resultList = this.baseDao.sqlQueryResult(sql, new Object[]{attrValue});
+        if (resultList != null && resultList.size() > 0) {
+            throw new OperateFailureException(repeatedMsg);
+        }
+
+    }
+
+    /**
+     * 验证表中某个字段对应的值是否存在
+     *
+     * @param tableName
+     * @param attrName
+     * @param attrValue
+     */
+    private List<JSONObject> listRepeated(String tableName, String attrName, String attrValue) {
+        String sql = new StringBuilder("select * from ")
+                .append(tableName)
+                .append(" a where a.").append(attrName)
+                .append(" = ?").toString();
+        logger.info(sql.toString());
+        return this.baseDao.sqlQueryResult(sql, new Object[]{attrValue});
+    }
+
+    @Override
+    public List<JSONObject> listOemSaleData(String stor_id) {
+        StringBuilder sql = new StringBuilder("select distinct a.*, b.rep_nm, c.[Store Name], d.brnd_nm, d.mdl_nm ")
+                .append(" from  prc_oem_str_scan_data a")
+                .append(" LEFT JOIN view_msp_xoem_product_list d ON a.brnd_id = d.brnd_id ")
+                .append(" and a.mdl_id = d.mdl_id,")
+                .append(" external_v_stor_rep_lst b, external_v_xoem_stor_lst_mbl c")
+                .append(" where a.stor_id = ? and a.last_upd_dtm >=dateadd(month, -1, GETDATE())")
+                .append(" and a.rep_id = b.rep_id and a.stor_id = c.[Intel Store Id]")
+                .append(" order by a.last_upd_dtm desc");
+        logger.info(sql.toString());
+        return this.baseDao.sqlQueryResult(sql.toString(), new Object[]{Integer.valueOf(stor_id)});
+    }
+
+    @Override
+    public void deleteOemSaleData(String id) {
+        StringBuilder sql = new StringBuilder("delete from  prc_oem_str_scan_data")
+                .append(" where id=? ");
+        logger.info(sql.toString());
+        this.baseDao.executeDdlSql(sql.toString(), new Object[]{Integer.valueOf(id)});
+    }
+
+    /**
+     * 查看diy销量数据
+     *
+     * @param stor_id
+     */
+    @Override
+    public List<JSONObject> listDiySaleData(String stor_id) {
+        StringBuilder sql = new StringBuilder("select distinct a.*, b.rep_nm, c.stor_nm from  prc_diy_str_scan_data a,")
+                .append(" external_v_stor_rep_lst b, external_v_diy_stor_lst_mbl c")
+                .append(" where a.stor_id = ? and a.last_upd_dtm >=dateadd(month, -1, GETDATE())")
+                .append(" and a.rep_id = b.rep_id and a.stor_id = c.stor_id")
+                .append(" order by a.last_upd_dtm desc");
+        logger.info(sql.toString());
+        return this.baseDao.sqlQueryResult(sql.toString(), new Object[]{Integer.valueOf(stor_id)});
+    }
+
+    /**
+     * 删除diy销量数据
+     *
+     * @param id
+     */
+    @Override
+    public void deleteDiySaleData(String id) {
+        StringBuilder sql = new StringBuilder("delete from  prc_diy_str_scan_data")
+                .append(" where id=? ");
+        logger.info("diysaledata:" + sql.toString());
+        this.baseDao.executeDdlSql(sql.toString(), new Object[]{Integer.valueOf(id)});
+    }
+
+    @Override
+    public List<SerializableJSONObject> listPhotoByStoreWv(int stor_id, int wv_id) {
+        String sql = new StringBuilder("SELECT distinct b.pht_cat_nm as pht_cat_nm, a.pic_id as pic_id,")
+                .append(" a.stor_id as stor_id, a.wv_id as wv_id,")
+                .append(" a.pht_pth as pht_pth, a.pht_cat as pht_cat,")
+                .append(" a.last_upd_usr_id as last_upd_usr_id,")
+                .append(" a.cmnts as cmnts, a.last_upd_dtm as last_upd_dtm,")
+                .append("  c.rep_nm as last_upd_usr_nm")
+                .append(" FROM msp_stor_pic_rsp  a ")
+                .append(" LEFT JOIN dbo.msp_pht_cat b ON a.pht_cat=b.pht_cat, ")
+                .append(" external_v_stor_rep_lst c WHERE a.last_upd_usr_id = c.rep_id")
+                .append(" AND a.stor_id = ?")
+                .append(" AND a.wv_id = ?")
+                .append(" order by a.pht_cat").toString();
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult4Cache(sql, new Object[]{stor_id, wv_id});
+    }
+
+    @Override
+    public List<SerializableJSONObject> listPhotoByStoreWvCate(int stor_id, int wv_id, int category) {
+        String sql = new StringBuilder("SELECT distinct b.pht_cat_nm as pht_cat_nm, a.pic_id as pic_id,")
+                .append(" a.stor_id as stor_id, a.wv_id as wv_id,")
+                .append(" a.pht_pth as pht_pth, a.pht_cat as pht_cat,")
+                .append(" a.last_upd_usr_id as last_upd_usr_id,")
+                .append(" a.cmnts as cmnts, a.last_upd_dtm as last_upd_dtm,")
+                .append("  c.rep_nm as last_upd_usr_nm")
+                .append(" FROM msp_stor_pic_rsp  a ")
+                .append(" LEFT JOIN dbo.msp_pht_cat b ON a.pht_cat=b.pht_cat, ")
+                .append(" external_v_stor_rep_lst c WHERE a.last_upd_usr_id = c.rep_id")
+                .append(" AND a.stor_id = ?")
+                .append(" AND a.wv_id = ?")
+                .append(" AND a.pht_cat = ?")
+                .append(" order by a.pht_cat").toString();
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult4Cache(sql, new Object[]{stor_id, wv_id, category});
+    }
+
+
+    @Override
+    @Cacheable(value = "wvCache", key = "#role_id + #city_type_nm + #quarter + 'listWvByQuarter'")
+    public List<SerializableJSONObject> listWvByQuarter(int role_id, String city_type_nm, int quarter) throws JSONException {
+        List<Integer> quarterList = new ArrayList<Integer>();
+        quarterList.add(quarter);
+        return this.listWvByQuarterList(role_id, city_type_nm, quarterList);
+    }
+
+    @Override
+    @Cacheable(value = "wvCache", key = "#role_id + #city_type_nm + #quarter + 'listWvByQuarterList'")
+    public List<SerializableJSONObject> listWvByQuarterList(int role_id, String city_type_nm, List<Integer> quarterList)
+            throws JSONException {
+        if (role_id == Consts.ROLE_DIY) {
+            return this.listDiyWvByQuarter(city_type_nm, quarterList);
+        } else if (role_id == Consts.ROLE_OEM) {
+            //modify by qxl 7.9.2014
+            return this.listOemWvByQuarter(city_type_nm, quarterList);
+        }
+        return new ArrayList<SerializableJSONObject>();
+    }
+
+    /**
+     * 查询diy wv
+     *
+     * @param city_type_nm
+     * @param quarterList
+     * @return
+     * @throws JSONException
+     */
+    private List<SerializableJSONObject> listDiyWvByQuarter(String city_type_nm, List<Integer> quarterList) throws JSONException {
+        String sql = new StringBuilder("SELECT * FROM msp_wv a, Msp_wv_type b WHERE a.yyyyqq in (")
+                .append(CommonUtils.collectionToStr(quarterList)).append(")")
+                .append(" and a.wv_type_id = b.wv_type_id and b.wv_type_nm = ?")
+                .append(" order by a.wv_strt_dt").toString();
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult4Cache(sql, new Object[]{city_type_nm});
+    }
+
+    //modify by qxl 7.9.2014
+    private List<SerializableJSONObject> listOemWvByQuarter(String city_type_nm, List<Integer> quarterList) throws JSONException {
+//        if (role_id==78) {
+        String sql = new StringBuilder("SELECT\n" +
+                "\t*\n" +
+                "FROM\n" +
+                "\tmsp_wv a,\n" +
+                "\tMsp_wv_type b\n" +
+                "WHERE\n" +
+                "\ta.yyyyqq IN (")
+                .append(CommonUtils.collectionToStr(quarterList)).append(")")
+                .append(" AND a.wv_type_id = b.wv_type_id\n" +
+                        "AND b.wv_type_nm = 'OEM'\n" +
+                        "AND b.city_type = ?\n" +
+                        "AND a.wv_strt_dt <= GETDATE()\n" +
+                        "AND GETDATE() <= a.wv_end_dt\n" +
+                        "ORDER BY\n" +
+                        "\ta.wv_strt_dt")
+                .toString();
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult4Cache(sql, new Object[]{city_type_nm});
+    }
+
+    /**
+     * 获取wvtype集合
+     *
+     * @param role_id
+     * @param city_type_nm
+     * @return
+     */
+    private List<Integer> listWvtype(int role_id, String city_type_nm) throws JSONException {
+        List<SerializableJSONObject> categoryJsonList = this.ehcacheService.listCategory(role_id, city_type_nm);
+        List<Integer> categoryList = new ArrayList<Integer>();
+        for (SerializableJSONObject jsonObject : categoryJsonList) {
+            if (jsonObject.get("pht_cat") != null) {
+                categoryList.add((Integer) jsonObject.get("pht_cat"));
+            }
+        }
+
+        //获取不重复的wvtype集合
+        Set<Integer> wvtypeSet = new HashSet<Integer>();
+        for (Integer category : categoryList) {
+            if (role_id == Consts.ROLE_DIY) {//diy
+                wvtypeSet.add(getCommmonParamValue(category, 1));
+            } else if (role_id == Consts.ROLE_OEM) {
+                wvtypeSet.add(getWvId4Oem(category, city_type_nm));
+            }
+        }
+        return new ArrayList<Integer>(wvtypeSet);
+    }
+
+
+    /**
+     * 获取参数值
+     *
+     * @param photo_cat
+     * @param defaultValue
+     * @return
+     */
+    private int getCommmonParamValue(int photo_cat, int defaultValue) {
+        int paramValue = defaultValue;
+        if (photo_cat == 30) {
+            paramValue = 5;
+        }
+        if (photo_cat == 40) {
+            paramValue = 6;
+        }
+        return paramValue;
+    }
+
+    private int getWvId4Diy(int photo_cat) {
+        return getCommmonParamValue(photo_cat, 1);
+    }
+
+    /**
+     * 获取wvId
+     *
+     * @param photo_cat
+     * @return
+     */
+    private int getWvId4Oem(int photo_cat, String city_type_nm) {
+        if ("MM".equals(city_type_nm)) {
+            return getCommmonParamValue(photo_cat, 2);
+        } else {
+            return getCommmonParamValue(photo_cat, 4);
+        }
+    }
+
+    @Override
+    public List<SerializableJSONObject> listCategoryByWave(int role_id, String city_type_nm, int wv_id, int stor_id) {
+        if (role_id == Consts.ROLE_DIY) {
+            return this.listDiyCategoryByWave(city_type_nm, wv_id, stor_id);
+        } else if (role_id == Consts.ROLE_OEM) {
+            return this.listOemCategoryByWave(wv_id, stor_id);
+        }
+        return new ArrayList<SerializableJSONObject>();
+    }
+
+    /**
+     * 查询diy category
+     *
+     * @param city_type_nm
+     * @param wv_id
+     * @param stor_id
+     * @return
+     */
+    private List<SerializableJSONObject> listDiyCategoryByWave(String city_type_nm, int wv_id, int stor_id) {
+        StringBuilder sql = new StringBuilder("SELECT a.pht_cat, a.pht_cat_nm, a.dsply_ord_nbr,")
+                .append("  a.cmnts, a.pht_qty, count(DISTINCT b.pic_id) as pic_count")
+                .append("  FROM msp_pht_cat a LEFT JOIN msp_stor_pic_rsp b on a.pht_cat = b.pht_cat")
+                .append("  and b.stor_id = ? and b.wv_id = ? ,")
+                .append("  Msp_wv_type c")
+                .append("  WHERE a.rec_sts_id=1 ")
+                .append(" and a.wv_type = c.wv_type_id and c.wv_type_nm = ?")
+                .append(" group by a.pht_cat, a.pht_cat_nm, a.dsply_ord_nbr, a.cmnts, a.pht_qty");
+        logger.info(sql.toString());
+        return this.baseDao.sqlQueryResult4Cache(sql.toString(), new Object[]{stor_id, wv_id, city_type_nm});
+    }
+
+    /**
+     * 根据wv_id查询图片分类
+     *
+     * @param wv_id
+     * @param stor_id
+     * @return
+     */
+    private List<SerializableJSONObject> listOemCategoryByWave(int wv_id, int stor_id) {
+        StringBuilder sql = new StringBuilder("SELECT a.pht_cat, a.pht_cat_nm, a.dsply_ord_nbr, ")
+                .append(" a.cmnts, a.pht_qty, count(DISTINCT b.pic_id) as pic_count ")
+                .append(" FROM msp_wv c ,msp_pht_cat a  LEFT JOIN msp_stor_pic_rsp b ON a.pht_cat = b.pht_cat ")
+                .append(" and b.stor_id = ? and b.wv_id = ? ")
+                .append(" WHERE a.rec_sts_id = 1 ")
+                .append(" and c.wv_id = ?  and c.wv_type_id = a.wv_type ")
+                .append(" group by a.pht_cat, a.pht_cat_nm, a.dsply_ord_nbr, a.cmnts, a.pht_qty");
+        logger.info(sql.toString());
+        return this.baseDao.sqlQueryResult4Cache(sql.toString(), new Object[]{stor_id, wv_id, wv_id});
+    }
+
+    @Override
+    public List<SerializableJSONObject> listMessage(int rsp_id, String statusStr, String keyword) {
+        StringBuilder sql = new StringBuilder("select distinct a.*, c.msg_type_nm from prc_mbl_msg a, ")
+                .append(" prc_mbl_msg_user_reltn b, prc_msg_type c")
+                .append(" where a.msg_type_id = c.msg_type_id and a.msg_id = b.msg_id")
+                .append(" and b.user_id =?")
+                .append(" and b.user_type_id = 2")
+                .append(" and b.rec_sts_id in (").append(statusStr).append(")")
+                .append(" and ( (a.msg_schdl_dtm >= dateadd(month, -3, GETDATE())")
+                .append(" and a.msg_schdl_dtm <= GETDATE()) or a.msg_schdl_dtm is null) ");
+        List<String> objectList = Lists.newArrayList(String.valueOf(rsp_id));
+        if (!StringUtils.isBlank(keyword)) {
+            sql.append(" and (a.msg_ttl like '%' + ? + '%' or a.msg_cntnt like '%' + ? + '%')");
+            objectList.add(keyword);
+            objectList.add(keyword);
+        }
+        logger.info(sql.toString());
+        return this.baseDao.sqlQueryResult4Cache(sql.toString(), objectList.toArray());
+    }
+
+    @Override
+    public int countUnReadMsg(int rsp_id) {
+        StringBuilder sql = new StringBuilder("select count(distinct a.msg_id) as msg_count from prc_mbl_msg a, ")
+                .append(" prc_mbl_msg_user_reltn b")
+                .append(" where a.msg_id = b.msg_id")
+                .append(" and b.user_id =?")
+                .append(" and b.user_type_id = 2")
+                .append(" and b.rec_sts_id = 1")
+                .append(" and ( (a.msg_schdl_dtm >= dateadd(month, -3, GETDATE())")
+                .append(" and a.msg_schdl_dtm <= GETDATE()) or a.msg_schdl_dtm is null) ");
+        logger.info(sql.toString());
+        return Integer.valueOf(this.baseDao.sqlUtils(sql.toString(), "msg_count", new Object[]{rsp_id}));
+    }
+
+    @Override
+    public void updateMessageStatus(int msg_id, int rsp_id) {
+        StringBuilder relationShip = new StringBuilder("update prc_mbl_msg_user_reltn set ")
+                .append(" rec_sts_id = 2, rcv_dtm = getdate(), last_upd_dtm = getdate(),")
+                .append(" last_upd_usr_id = ? ")
+                .append(" where msg_id = ? and user_id = ? and user_type_id = 2");
+        logger.info(relationShip.toString());
+        this.baseDao.executeDdlSql(relationShip.toString(), new Object[]{rsp_id, msg_id, rsp_id});
+    }
+
+    @Override
+    public List<SerializableJSONObject> listStoreSalesData(int rsp_id) {
+        List<SerializableJSONObject> resultList = Lists.newArrayList();
+        List<SerializableJSONObject> storeList = this.ehcacheService.listRspStore(String.valueOf(rsp_id));
+        if (storeList == null || storeList.size() == 0) {
+            return resultList;
+        }
+        ImmutableList.Builder<Integer> builder = new ImmutableList.Builder<Integer>();
+        for (SerializableJSONObject jsonObject : storeList) {
+            builder.add((Integer) jsonObject.get("stor_id"));
+        }
+        StringBuilder sqlBuilder = new StringBuilder()
+                .append("SELECT yyyyqq, a.Stor_id, a.City_type, por_name, POr, ")
+                .append(" SO, high_end_por_name, High_end_por,  High_end_SO,  b.stor_nm")
+                .append(" FROM Mobile_SO_Por a, external_v_diy_stor_lst_mbl b WHERE a.stor_id in (")
+                .append(Joiner.on(",").join(builder.build())).append(")")
+                .append(" AND a.yyyyqq in (").append(Joiner.on(",").join(QuarterUtil.getCurrentQuarter(),
+                        QuarterUtil.getPreviousQuarter())).append(")")
+                .append(" and a.Stor_id = b.stor_id ORDER BY a.Stor_id, a.yyyyqq ");
+        logger.info(sqlBuilder.toString());
+        return this.baseDao.sqlQueryResult4Cache(sqlBuilder.toString());
+    }
+
+    @Override
+    public List<SerializableJSONObject> listStoreBonus(int rsp_id) {
+        List<SerializableJSONObject> resultList = Lists.newArrayList();
+        List<SerializableJSONObject> storeList = this.ehcacheService.listRspStore(String.valueOf(rsp_id));
+        if (storeList == null || storeList.size() == 0) {
+            return resultList;
+        }
+        ImmutableList.Builder<Integer> builder = new ImmutableList.Builder<Integer>();
+        for (SerializableJSONObject jsonObject : storeList) {
+            builder.add((Integer) jsonObject.get("stor_id"));
+        }
+        StringBuilder sqlBuilder = new StringBuilder()
+                .append(" SELECT distinct a.*, b.stor_nm FROM view_store_bonus a, stdb_stor b  ")
+                .append(" WHERE a.stor_id = b.stor_id");
+        final String sql = JdbcUtils.sqlInOperate(sqlBuilder, "a", "stor_id", builder.build().toArray());
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult4Cache(sql, null, builder.build().toArray());
+    }
+
+    @Override
+    public List<SerializableJSONObject> listApkVersion(int apk_type) {
+        String sql = " select * from prc_mbl_apk_version a WHERE a.rec_sts != -1 and a.apk_type = ? ";
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult4Cache(sql, new Object[]{apk_type});
+    }
+
+    @Override
+    public void addMsgsendData(String msg_title, String msg_content, int sended_sr_id, int sended_sr_type) {
+        StringBuilder sql = new StringBuilder()
+                .append(" insert into prc_mbl_msg_send_record  ")
+                .append(" (msg_title, msg_content, sended_sr_id, sended_sr_type, cre_dtm) ")
+                .append(" values(?, ?, ? ,?, getdate()) ");
+        logger.info(sql.toString());
+        this.baseDao.executeDdlSql(sql.toString(), new Object[]{msg_title, msg_content, sended_sr_id, sended_sr_type});
+    }
+
+    /**
+     * 根据 sr_id和sr_type统计短信已发送次数
+     *
+     * @param sended_sr_id
+     * @param sended_sr_type
+     */
+    public void countSrMsgSend(int sended_sr_id, int sended_sr_type) {
+        StringBuilder sql = new StringBuilder()
+                .append(" select count( * ) from prc_mbl_msg_send_record ")
+                .append(" where sended_sr_id =? and sended_sr_type = ? ")
+                .append(" and cre_dtm between dateadd(ms, 0, dateadd(dd, datediff( dd, 0, getdate()), 0)) ")
+                .append(" and dateadd(ms, -3, dateadd(dd, datediff(dd, -1, getdate()), 0)) ");
+        logger.info(sql.toString());
+        int count = this.baseDao.sqlCount(sql.toString(), new Object[]{sended_sr_id, sended_sr_type});
+        if (count >= 3) {
+            throw new OperateFailureException(" 获取密码过于频繁，每天只能获取三次密码 ");
+        }
+    }
+
+    @Override
+    public void pictureUpload(String pht_pth, String rsp_id, int store_id, int photo_cat,
+                              String photo_comment, String location_longitude,
+                              String location_latitude, String mdl_id, String stor_addr, int wv_id) throws JSONException {
+        StringBuilder sql = new StringBuilder()
+                .append("insert into msp_stor_pic_rsp(stor_id, wv_id, pht_cat,")
+                .append(" pht_pth, pht_not_avl_flg, last_upd_usr_id, last_upd_dtm,")
+                .append(" cmnts, loc_longitude, loc_latitude, loc_addr, mdl_id)")
+                .append(" values(?, ?, ?, ?, null, ?, GETDATE(), ?, ?, ?, ?, ?) ");
+        logger.info(sql.toString());
+        this.baseDao.executeDdlSql(sql.toString(), new Object[]{store_id, wv_id, photo_cat, pht_pth, Integer.valueOf(rsp_id),
+                photo_comment, location_latitude, location_longitude, stor_addr, mdl_id});
+    }
+
+    /**
+     * 删除图片的数据库记录
+     *
+     * @param slsprs_id
+     * @param store_id
+     * @param pic_id
+     * @throws JSONException
+     */
+    public void deletePicDbRecord(String slsprs_id, String store_id, String pic_id) throws JSONException {
+        //验证是否符合删除逻辑
+        String sql = new StringBuilder("select a.pic_id, b.wv_strt_dt, b.wv_end_dt, a.pht_pth  from ")
+                .append("msp_stor_pic_rsp").append(" a, msp_wv b  where a.pic_id=?")
+                .append(" and a.stor_id=?")
+                .append(" and a.last_upd_usr_id=?")
+                .append(" and a.wv_id = b.wv_id")
+                .toString();
+        logger.info(sql);
+        List<Object[]> objArrayList = this.baseDao.sqlQueryObjArrayResult(sql, new Object[]{
+                Integer.valueOf(pic_id), Integer.valueOf(store_id), Integer.valueOf(slsprs_id)
+        });
+        if (objArrayList == null || objArrayList.size() == 0) {
+            throw new OperateFailureException("不存在可删除的图片！");
+        }
+        Date currDate = new Date();
+        Date wvStrtDt = (Date) objArrayList.get(0)[1];
+        Date wvEndDt = (Date) objArrayList.get(0)[2];
+        if (currDate.before(wvStrtDt) || currDate.after(wvEndDt)) {
+            throw new OperateFailureException("该图片已被锁定，不能删除！");
+        }
+
+        //删除数据
+        String deleteSql = new StringBuilder("delete from ").append("msp_stor_pic_rsp")
+                .append(" where pic_id=?").toString();
+        logger.info(deleteSql);
+        this.baseDao.executeDdlSql(deleteSql, new Object[]{Integer.valueOf(pic_id)});
+    }
+
+    /**
+     * 根据季度和门店id获取门店当前季度的diy销量数据汇总
+     *
+     * @param stor_id
+     * @param yyyyqq
+     * @return
+     */
+    public List<SerializableJSONObject> listDiyStoreSaleSummary(int stor_id, int yyyyqq) {
+        StringBuilder sql = new StringBuilder("SELECT a.sku_brand, COUNT (a.salesout) as salescount")
+                .append(" FROM prc_diy_str_scan_data_sum a  ")
+                .append(" WHERE a.stor_id = ? AND a.yyyyqq = ? ")
+                .append(" GROUP BY a.sku_brand");
+        logger.info(sql.toString());
+        return this.baseDao.sqlQueryResult4Cache(sql.toString(), new Object[]{stor_id, yyyyqq});
+    }
+
+    //qxl 7.28
+
+    /**
+     * 添加rsp
+     *
+     * @param rep_nm
+     * @param rep_tel
+     * @param rep_email
+     * @param last_upd_usr_id
+     * @param rep_bank_nm
+     * @param rep_bank_acct_nbr
+     * @param city_id
+     * @return
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void addRspNew(String rep_nm, String rep_tel, String rep_email, String last_upd_usr_id,
+                          String rep_bank_nm, String rep_bank_acct_nbr, String city_id,
+                          String rep_gvrnmt_id, String rep_bank_city, String log_pwd,
+                          String stor_id, String auth) throws SQLException {
+        //验证登陆账号是否唯一
+        this.checkAccountUnique(rep_tel, null);
+        //新增店员个体
+        String sql = new StringBuilder("insert into stdb_store_rep(rep_nm, rep_tel, rep_email, rec_sts_id,")
+                .append(" last_upd_usr_id, last_upd_dtm, rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id,")
+                .append(" city_id, rep_bank_city, log_pwd, lastlogin,auth) ")
+                .append(" values(?, ?, ?, 1, ?, GETDATE(), ?, ?, ?, ?, ?, ?, GETDATE(),?)").toString();
+        //记录新增店员
+        String sql2 = new StringBuilder("insert into Stdb_store_rep_hist(hist_type, hist_dtm, rep_id, rep_nm, ")
+                .append(" rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, new_rep_id,auth)")
+                .append("select 1 as hist_type, GETDATE() as hist_dtm, rep_id, rep_nm, rep_tel, rep_email, rec_sts_id, ")
+                .append(" last_upd_usr_id, last_upd_dtm,rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id,")
+                .append("rep_bank_city, log_pwd, lastlogin, null as new_rep_id,auth from Stdb_store_rep where rep_id = ?").toString();
+        logger.info(sql);
+        logger.info(sql2);
+        Object primaryKey = this.baseDao.insertReturnPrimaryKey(sql, new Object[]{rep_nm, rep_tel, rep_email,
+                last_upd_usr_id, rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id,
+                city_id, rep_bank_city, RC2Encryptor.toByte(RC2Encryptor.encrypt(log_pwd)), auth});
+        this.baseDao.insertReturnPrimaryKey(sql2, new Object[]{primaryKey});
+        //新增店员和门店的关联关系
+        String relationSql = new StringBuilder("insert into stdb_stor_rep_reltn(stor_id,rep_id,strt_dt,end_date,last_upd_usr_id,last_upd_dtm,")
+                .append("rep_asgn_role_id,rec_sts_id,key_rep_flg)")
+                .append(" values(?, ?, null, null, ?, GETDATE(), 2, 1, null)").toString();
+        //    h记录关联关系
+        String relationSql2 = new StringBuilder(" insert into Stdb_stor_rep_reltn_hist (hist_type, his_dtm,")
+                .append(" stor_id, rep_id, strt_dt, end_date, last_upd_usr_id, last_upd_dtm,")
+                .append(" rep_asgn_role_id, rec_sts_id, key_rep_flg)")
+                .append(" select 1 as hist_type, GETDATE() as hist_dtm, stor_id,rep_id,strt_dt,end_date,")
+                .append(" last_upd_usr_id,last_upd_dtm,rep_asgn_role_id,rec_sts_id,key_rep_flg from Stdb_stor_rep_reltn ")
+                .append(" where stor_id=? and last_upd_usr_id=?").toString();
+        logger.info(relationSql);
+        logger.info(relationSql2);
+        this.baseDao.executeDdlSql(relationSql, new Object[]{stor_id, primaryKey.toString(), last_upd_usr_id});
+        this.baseDao.executeDdlSql(relationSql2, new Object[]{stor_id, last_upd_usr_id});
+    }
+
+    /**
+     * 修改邮箱和电话
+     *
+     * @param rep_tel
+     * @param rep_email
+     * @param rep_id
+     * @param operate_id
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void modifyRspNew(String rep_tel, String rep_email, String rep_id, String operate_id, String auth) {
+        //验证新的电话是否唯一
+        this.checkAccountUnique(rep_tel, rep_id);
+        //修改rsp邮箱和电话
+        String sql = new StringBuilder("update stdb_store_rep set rep_tel=?,auth=?,")
+                .append(" rep_email=?, last_upd_usr_id=?, last_upd_dtm=GETDATE()")
+                .append("  where rep_id=?").toString();
+        logger.info(sql);
+        //插入intel想要的表
+        StringBuilder intelSql = new StringBuilder("insert into Stdb_store_rep_hist(hist_type, hist_dtm, rep_id, rep_nm,")
+                .append(" rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, new_rep_id,auth)")
+                .append(" select 2 as hist_type, GETDATE() as hist_dtm, rep_id, rep_nm, rep_tel, rep_email,")
+                .append(" rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, null as new_rep_id,auth from Stdb_store_rep where rep_id = ?");
+        this.baseDao.executeDdlSql(sql, new Object[]{rep_tel, auth, rep_email, operate_id, rep_id});
+        logger.info(intelSql.toString());
+        this.baseDao.executeDdlSql(intelSql.toString(), new Object[]{rep_id});
+    }
+
+    /**
+     * 删除Rspnew
+     *
+     * @param operate_rsp_id
+     * @param rsp_id
+     */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void deleteRspNew(String operate_rsp_id, String rsp_id) {
+        //验证被删除Rsp是否属于当前Rsp
+        if (!checkRspRelation(operate_rsp_id, rsp_id)) {
+            throw new OperateFailureException("被删除店员不属于您管理，你不能删除！");
+        }
+        //删除店员和门店的管理关系（非物理删除）
+        this.deleteRspStoreRelation(rsp_id);
+        this.recordRspStoreRelationHist(rsp_id);
+
+        //删除店员（非物理删除）
+        this.deleteRsp(rsp_id);
+        String sql = new StringBuilder("insert into Stdb_store_rep_hist (hist_type, hist_dtm, rep_id, rep_nm, ")
+                .append(" rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, new_rep_id,auth)")
+                .append(" select 2 as hist_type, GETDATE() as hist_dtm, rep_id, rep_nm, rep_tel, rep_email, rec_sts_id, last_upd_usr_id, last_upd_dtm, ")
+                .append(" rep_bank_nm, rep_bank_acct_nbr, rep_gvrnmt_id, city_id, ")
+                .append(" rep_bank_city, log_pwd, lastlogin, null as new_rep_id,auth from Stdb_store_rep where rep_id = ?").toString();
+        logger.info(sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{rsp_id});
+    }
+}
+
