@@ -1,0 +1,997 @@
+package com.intel.store.service;
+
+import com.intel.store.common.*;
+import com.intel.store.dao.AwsProdDao;
+import com.intel.store.dao.BaseDao;
+import com.intel.store.dao.ImageUploadDao;
+import com.intel.store.dao.ToolsDao;
+import com.intel.store.exception.OperateFailureException;
+import com.intel.store.exception.SessionTimeoutException;
+import com.intel.store.model.ClientSession;
+import com.intel.store.service.Interface.StoreService;
+import junit.framework.Assert;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+
+/**
+ * Created with qiangxiaolong
+ * User: P0031372
+ * Date: 13-8-10
+ * Time: 下午7:02.
+ */
+public class StoreServiceImpl implements StoreService {
+    private static Logger logger = LoggerFactory.getLogger(StoreServiceImpl.class);
+    private ToolsDao toolsDao;
+    private BaseDao baseDao;
+    private ImageUploadDao imageUploadDao;
+
+    public void setAwsProdDao(AwsProdDao awsProdDao) {
+        this.awsProdDao = awsProdDao;
+    }
+
+    private AwsProdDao awsProdDao;
+
+    public void setBaseDao(BaseDao baseDao) {
+        this.baseDao = baseDao;
+    }
+
+    public void setImageUploadDao(ImageUploadDao imageUploadDao) {
+        this.imageUploadDao = imageUploadDao;
+    }
+
+    protected String SQL_QuerySRDetail = "SELECT * FROM dbo.view_sr_profile WHERE slsprs_id=";
+
+    protected String SQL_QuerySRRole = "SELECT  * FROM vw_mip_role_user WHERE slsprs_id=";
+
+    protected String SQL_QuerySRCity = "SELECT city_id, city_std_loc_nm FROM external_v_slsprs_city_asgn WHERE slsprs_id=";
+
+    protected String SQL_QueryDIYStore = "SELECT * FROM external_v_stor_lst  a INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=";
+    protected String SQL_QueryDIYStore2 = "WHERE c.slsprs_id=";
+    protected String SQL_QueryDIYStore3 = " And a.DIY='DIY' AND a.rec_sts_id=1 AND a.cat_type_id IN (1,2,3,6) order by a.city_nm";
+
+    //    SELECT * FROM external_v_xoem_stor_lst  a
+//    INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id    --OEM SR can only view the stores in covered city
+//    INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=78  --just OEM SR can view OEM Stores
+//    WHERE c.slsprs_id=90245
+//    protected String SQL_QueryOEMStore = "SELECT * FROM external_v_xoem_stor_lst  a INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=";
+    protected String SQL_QueryOEMStore = " SELECT * FROM external_v_xoem_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=";
+    protected String SQL_QueryOEMStore2 = " WHERE c.slsprs_id=";
+    protected String SQL_QueryOEMStore3 = " order by a.city";
+
+    protected String SQL_QueryCategory = "SELECT pht_cat, pht_cat_nm, dsply_ord_nbr, cmnts, pht_qty FROM msp_pht_cat WHERE rec_sts_id=1 AND prog_type=";
+
+    protected String SQL_QueryStorePic = "SELECT b.pht_cat_nm as pht_cat_nm, a.pic_id as pic_id," +
+            " a.stor_id as stor_id, a.wv_id as wv_id," +
+            " a.pht_pth as pht_pth, a.pht_cat as pht_cat," +
+            " a.last_upd_usr_id as last_upd_usr_id," +
+            " a.cmnts as cmnts, a.last_upd_dtm as last_upd_dtm" +
+            " FROM msp_stor_pic  a " +
+            " LEFT JOIN dbo.msp_pht_cat b ON a.pht_cat=b.pht_cat " +
+            " WHERE stor_id= ";
+    protected String SQL_QueryStorePic2 = " AND a.last_upd_dtm>=DATEADD(mm,-6,GETDATE())  " +
+            "ORDER BY a.last_upd_dtm desc";
+
+    protected String SQL_QueryDIYStoreByCity = " And a.DIY='DIY' AND a.rec_sts_id=1 AND a.cat_type_id IN (1,2,3,6) and a.city_nm LIKE ";
+    protected String SQL_QueryOEMStoreByCity = " and a.city LIKE ";
+
+    protected String SQL_QueryOEMProduct = "select distinct prd_cat_id,prd_cat_nm from view_msp_xoem_product_list";
+    protected String SQL_QueryOEMModel = "select distinct mdl_id,mdl_nm from view_msp_xoem_product_list where prd_cat_id =";
+    protected String SQL_QueryOEMBrand = "select distinct brnd_id,brnd_nm from view_msp_xoem_product_list where prd_cat_id =";
+
+    public ToolsDao getToolsDao() {
+        return toolsDao;
+    }
+
+    public void setToolsDao(ToolsDao toolsDao) {
+        this.toolsDao = toolsDao;
+
+    }
+
+    @Override
+    public List<JSONObject> QuerySRDetail(String slsprs_id) {
+        Assert.assertNotNull(slsprs_id);
+        String sql = SQL_QuerySRDetail + "?";
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{slsprs_id});
+    }
+
+    @Override
+    public List<JSONObject> QuerySRRole(String slsprs_id) {
+        Assert.assertNotNull(slsprs_id);
+        String sql = SQL_QuerySRRole + "?";
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{slsprs_id});
+    }
+
+    @Override
+    public List<JSONObject> QuerySRCity(String slsprs_id) {
+        Assert.assertNotNull(slsprs_id);
+        String sql = SQL_QuerySRCity + "?";
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{slsprs_id});
+    }
+
+    @Override
+    public List<JSONObject> QueryDIYStore(String slsprs_id, String role_id) {
+        String SQL_QueryDIYStore_Count = "SELECT m.City_Type AS city_type_nm, a.stor_nm as stor_nm," + " a.stor_addr as stor_addr, a.pht_pth as pht_pth, a.city_nm as city_nm," + " a.cat_type_nm as cat_type_nm, a.stor_tel as stor_tel," + " a.stor_id as stor_id, a.stor_manager_name as stor_manager_name, a.mall_nm as mall_nm" + " , ISNULL(n.stor_id, '0') AS favourite, h.loc_latitude, h.loc_longitude" + " FROM external_v_diy_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id " + " INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=";
+        String SQL_QueryDIYStore2_Countd = " LEFT JOIN [prc_v_citytype_new] m ON a.city_id=m.city_id AND m.yyyyqq='" + QuarterUtil.getCurrentQuarter() + "' ";
+        String SQL_QueryDIYStore1_Count = " LEFT JOIN stdb_stor_slsprs_asgn n ON a.stor_id=n.stor_id ";
+        String SQL_QueryDIYStore0_Count = " LEFT JOIN stdb_stor_loc h ON a.stor_id=h.stor_id ";
+        String SQL_QueryDIYStore3_Count = "WHERE c.slsprs_id=";
+        String SQL_QueryDIYStore4_Count = " order by favourite desc ";
+        String seachSql = SQL_QueryDIYStore_Count + "?" + SQL_QueryDIYStore2_Countd
+                + SQL_QueryDIYStore1_Count
+                + SQL_QueryDIYStore0_Count
+                + SQL_QueryDIYStore3_Count + "?"
+                + SQL_QueryDIYStore4_Count;
+        logger.info(seachSql);
+        return this.baseDao.sqlQueryResult(seachSql, new Object[]{role_id, slsprs_id});
+    }
+
+    @Override
+    public List<JSONObject> QueryOEMStore(String slsprs_id, String role_id) {
+        String SQL_QueryOEMStore = "SELECT a.[Store Name] as [Store Name], a.mall_addr as mall_addr," + " a.pht_pth as pht_pth, b.city_std_loc_nm as city_std_loc_nm," + " a.Brand as Brand, a.Category as Category, " + " a.[Store Telephone] as [Store Telephone]," + " a.[Intel Store ID] as [Intel Store ID]," + " a.[Store Manager Name] as [Store Manager Name]," + " a.city_type_nm as city_type_nm, a.mall_nm as mall_nm, a.[Store Address] as [Store Address]" + " , ISNULL(n.stor_id, '0') AS favourite, h.loc_latitude, h.loc_longitude " + " FROM external_v_xoem_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id " + " INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=";
+        String SQL_QueryOEMStore1_Count = " LEFT JOIN stdb_stor_slsprs_asgn n ON a.[Intel Store ID]=n.stor_id ";
+        String SQL_QueryDIYStore0_Count = " LEFT JOIN stdb_stor_loc h ON a.[Intel Store ID]=h.stor_id ";
+        String SQL_QueryOEMStore4_Count = " order by favourite desc ";
+        String sql = SQL_QueryOEMStore + "?"
+                + SQL_QueryOEMStore1_Count
+                + SQL_QueryDIYStore0_Count
+                + SQL_QueryOEMStore2 + "?"
+                + " AND a.Category = 'High Touch' "
+                + SQL_QueryOEMStore4_Count;
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{role_id, slsprs_id});
+    }
+
+    public String wenhao = "?";
+
+    public List<JSONObject> QueryCategory(String role_id) {
+        String sql = SQL_QueryCategory + "?";
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{role_id});
+    }
+
+    public List<JSONObject> QueryCategory(String role_id, String city_type_nm) {
+        String sql = SQL_QueryCategory + wenhao + " AND city_type=" + wenhao;
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{role_id, city_type_nm});
+    }
+
+    @Override
+    public List<JSONObject> QueryStorePic(String stor_id) {
+//        StringBuilder sqlBuiler = new StringBuilder("");
+//        sqlBuiler.append(SQL_QueryStorePic);
+//        sqlBuiler.append("'").append(stor_id).append("'");
+//        sqlBuiler.append(SQL_QueryStorePic2);
+        String sql = SQL_QueryStorePic + wenhao + SQL_QueryStorePic2;
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{stor_id});
+    }
+
+    @Override
+    public List<JSONObject> QueryDIYStoreByCity(String slsprs_id, String role_id, String city) {
+        Assert.assertNotNull(slsprs_id);
+        String sql = SQL_QueryDIYStore + wenhao + SQL_QueryDIYStore2 + wenhao + SQL_QueryDIYStoreByCity + wenhao;
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{role_id, slsprs_id, city});
+    }
+
+    @Override
+    public List<JSONObject> QueryOEMStoreByCity(String slsprs_id, String role_id, String city) {
+        Assert.assertNotNull(slsprs_id);
+        Assert.assertNotNull(role_id);
+        String sql = SQL_QueryOEMStore + wenhao + SQL_QueryOEMStore2 + wenhao + SQL_QueryOEMStoreByCity + wenhao;
+        return this.baseDao.sqlQueryResult(sql, new Object[]{role_id, slsprs_id, city});
+    }
+
+    //以下为分页后的OEM,DIY店面查询方法
+    @Override
+    public List QueryDIYStoreByPage(String slsprs_id, String role_id, String city, Page page) {
+        Assert.assertNotNull(slsprs_id);
+        Assert.assertNotNull(role_id);
+        Assert.assertNotNull(city);
+        /*String sql = SQL_QueryDIYStore + "'" + role_id + "'" + SQL_QueryDIYStore2 + "'"
+                + slsprs_id + "'" + SQL_QueryDIYStoreByCity + "'" + new StringBuilder(city).append("%") + "'";
+        logger.info(sql);*/
+        String SQL_QueryDIYStore_Count = new StringBuilder("SELECT  m.City_Type AS city_type_nm, a.stor_nm as stor_nm,")
+                .append(" a.stor_addr as stor_addr, a.pht_pth as pht_pth, a.city_nm as city_nm,")
+                .append(" a.cat_type_nm as cat_type_nm, a.stor_tel as stor_tel,")
+                .append(" a.stor_id as stor_id, a.stor_manager_name as stor_manager_name, a.mall_nm as mall_nm,")
+                .append(" a.stor_manager_email as email, ")
+                .append(" case n.slsprs_id when '").append(slsprs_id).append("' then '")
+                .append(slsprs_id).append("' else '0' end as favourite, h.loc_latitude, h.loc_longitude ")
+//                .append(" ISNULL(n.slsprs_id, '0')  as favouriteSrId")
+                .append(" FROM external_v_diy_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=").toString();
+        String SQL_QueryDIYStore0_Count = " LEFT JOIN [prc_v_citytype_new] m ON a.city_id=m.city_id AND m.yyyyqq='" + QuarterUtil.getCurrentQuarter() + "' ";
+        String SQL_QueryDIYStore1_Count = " LEFT JOIN (select * from stdb_stor_slsprs_asgn m where  m.slsprs_id = '" + slsprs_id + "') n ON a.stor_id=n.stor_id ";
+        String SQL_QueryDIYStore5_Count = " LEFT JOIN stdb_stor_loc h ON a.stor_id=h.stor_id ";
+        String SQL_QueryDIYStore2_Count = " WHERE c.slsprs_id=";
+        String SQL_QueryDIYStore3_Count = " AND a.city_nm LIKE  ";
+        String SQL_QueryDIYStore4_Count = " order by favourite desc ";
+        String searchSql = SQL_QueryDIYStore_Count + "'" + role_id + "'"
+                + SQL_QueryDIYStore0_Count
+                + SQL_QueryDIYStore1_Count
+                + SQL_QueryDIYStore5_Count
+                + SQL_QueryDIYStore2_Count + "'" + slsprs_id + "'"
+                + SQL_QueryDIYStore3_Count + "'" + new StringBuilder(city).append("%") + "'"
+                + SQL_QueryDIYStore4_Count;
+        logger.info(searchSql);
+        if (page == null) {
+            return toolsDao.sqlQueryResult(searchSql);
+        } else {
+            return toolsDao.sqlGetForPage(searchSql, page);
+        }
+
+    }
+
+    @Override
+    public int getDIYStoreCount(String slsprs_id, String role_id, String city) {
+        Assert.assertNotNull(slsprs_id);
+        /*String SQL_QueryDIYStore_Count = "SELECT count(*) FROM external_v_stor_lst  a INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=";
+        String SQL_QueryDIYStore2_Count = "WHERE c.slsprs_id=";
+        String sql_count = SQL_QueryDIYStore_Count + "'" + role_id + "'" + SQL_QueryDIYStore2_Count + "'" + slsprs_id + "'" + SQL_QueryDIYStoreByCity + "'" + new StringBuilder(city).append("%") + "'";
+        logger.info(sql_count);*/
+        String SQL_QueryDIYStore_Count = new StringBuilder("SELECT count(*)")
+                .append(" FROM external_v_diy_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=").toString();
+        String SQL_QueryDIYStore0_Count = " LEFT JOIN [prc_v_citytype_new] m ON a.city_id=m.city_id AND m.yyyyqq='" + QuarterUtil.getCurrentQuarter() + "' ";
+        String SQL_QueryDIYStore2_Count = " WHERE c.slsprs_id=";
+        String SQL_QueryDIYStore3_Count = " AND a.city_nm LIKE  ";
+        String sql_count = SQL_QueryDIYStore_Count + "'" + role_id + "'" + SQL_QueryDIYStore0_Count + SQL_QueryDIYStore2_Count + "'" + slsprs_id + "'" + SQL_QueryDIYStore3_Count + "'" + new StringBuilder(city).append("%") + "'";
+        logger.info(sql_count);
+        return toolsDao.sqlGetCount(sql_count);
+    }
+
+    @Override
+    public List QueryOEMStoreByPage(String slsprs_id, String role_id, String city, Page page) {
+        Assert.assertNotNull(slsprs_id);
+        Assert.assertNotNull(role_id);
+        Assert.assertNotNull(city);
+        String SQL_QueryOEMStore = new StringBuilder("SELECT a.[Store Name] as [Store Name], a.mall_addr as mall_addr,")
+                .append(" a.pht_pth as pht_pth, b.city_std_loc_nm as city_std_loc_nm,")
+                .append(" a.Brand as Brand, a.Category as Category, ")
+                .append(" a.[Store Telephone] as [Store Telephone],")
+                .append(" a.[Intel Store ID] as [Intel Store ID],")
+                .append(" a.[Store Manager Name] as [Store Manager Name],")
+                .append(" a.city_type_nm as city_type_nm, a.mall_nm as mall_nm,")
+                .append(" a.[Store Manager Email] as email, a.[Store Address] as [Store Address], ")
+                .append(" case n.slsprs_id when '").append(slsprs_id).append("' then '")
+                .append(slsprs_id).append("' else '0' end as favourite, h.loc_latitude, h.loc_longitude")
+//                .append(" ISNULL(n.slsprs_id, '0')  as favouriteSrId")
+                .append(" FROM external_v_xoem_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=").toString();
+        String SQL_QueryDIYStore1_Count = " LEFT JOIN (select * from stdb_stor_slsprs_asgn m where  m.slsprs_id = '" + slsprs_id + "') n ON a.[Intel Store ID]=n.stor_id ";
+        String SQL_QueryDIYStore0_Count = " LEFT JOIN stdb_stor_loc h ON a.[Intel Store ID]=h.stor_id ";
+        String SQL_QueryDIYStore4_Count = " order by favourite desc ";
+        String sql = SQL_QueryOEMStore + "'" + role_id + "'"
+                + SQL_QueryDIYStore1_Count
+                + SQL_QueryDIYStore0_Count
+                + SQL_QueryOEMStore2 + "'"
+                + slsprs_id + "'" + SQL_QueryOEMStoreByCity + "'" + new StringBuilder(city).append("%") + "'"
+                + " AND a.Category = 'High Touch' "
+                + SQL_QueryDIYStore4_Count;
+        logger.info(sql);
+        if (page == null) {
+            return toolsDao.sqlQueryResult(sql);
+        } else {
+            return toolsDao.sqlGetForPage(sql, page);
+        }
+    }
+
+    @Override
+    public int getOEMStoreCount(String slsprs_id, String role_id, String city) {
+        Assert.assertNotNull(slsprs_id);
+        String SQL_QueryOEMStore_Count = "SELECT count(*) FROM external_v_xoem_stor_lst  a INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=";
+        String SQL_QueryOEMStore2_Count = "WHERE c.slsprs_id=";
+        String sql_count = SQL_QueryOEMStore_Count + "'" + role_id + "'" + SQL_QueryOEMStore2_Count + "'" + slsprs_id + "'"
+                + " AND a.city LIKE '" + new StringBuilder(city).append("%") + "'"
+                + " AND a.Category = 'High Touch'";
+        logger.info(sql_count);
+        return toolsDao.sqlGetCount(sql_count);
+    }
+
+    //以下为city=all时调用方法
+    @Override
+    public List QueryDIYStoreByPageNocity(String slsprs_id, String role_id, Page page) {
+        Assert.assertNotNull(slsprs_id);
+        Assert.assertNotNull(role_id);
+
+        /*String sql = SQL_QueryDIYStore + "'" + role_id + "'" + SQL_QueryDIYStore2 + "'"
+                + slsprs_id + "'" + SQL_QueryDIYStore3;
+        logger.info(sql);*/
+        String SQL_QueryDIYStore_Count = new StringBuilder("SELECT m.City_Type AS city_type_nm, a.stor_nm as stor_nm,")
+                .append(" a.stor_addr as stor_addr, a.pht_pth as pht_pth, a.city_nm as city_nm,")
+                .append(" a.cat_type_nm as cat_type_nm, a.stor_tel as stor_tel,")
+                .append(" a.stor_id as stor_id, a.stor_manager_name as stor_manager_name, a.mall_nm as mall_nm,")
+                .append(" a.stor_manager_email as email,")
+                .append(" case n.slsprs_id when '").append(slsprs_id).append("' then '")
+                .append(slsprs_id).append("' else '0' end as favourite, h.loc_latitude, h.loc_longitude")
+//                .append(" ISNULL(n.slsprs_id, '0')  as favouriteSrId")
+                .append(" FROM external_v_diy_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=").toString();
+        String SQL_QueryDIYStore0_Count = " LEFT JOIN [prc_v_citytype_new] m ON a.city_id=m.city_id AND m.yyyyqq='" + QuarterUtil.getCurrentQuarter() + "' ";
+        String SQL_QueryDIYStore1_Count = " LEFT JOIN (select * from stdb_stor_slsprs_asgn m where  m.slsprs_id = '" + slsprs_id + "') n ON a.stor_id=n.stor_id ";
+        String SQL_QueryDIYStore5_Count = " LEFT JOIN stdb_stor_loc h ON a.stor_id=h.stor_id ";
+        String SQL_QueryDIYStore2_Count = " WHERE c.slsprs_id=";
+        String SQL_QueryDIYStore4_Count = " order by favourite desc ";
+        String seachSql = SQL_QueryDIYStore_Count + "'" + role_id + "'"
+                + SQL_QueryDIYStore0_Count
+                + SQL_QueryDIYStore1_Count
+                + SQL_QueryDIYStore5_Count
+                + SQL_QueryDIYStore2_Count + "'" + slsprs_id + "'"
+                + SQL_QueryDIYStore4_Count;
+        logger.info(seachSql);
+        if (page == null) {
+            return toolsDao.sqlQueryResult(seachSql);
+        } else {
+            return toolsDao.sqlGetForPage(seachSql, page);
+        }
+
+    }
+
+    @Override
+    public int getDIYStoreCountNocity(String slsprs_id, String role_id) {
+        Assert.assertNotNull(slsprs_id);
+        /*String SQL_QueryDIYStore_Count = "SELECT count(*) FROM external_v_stor_lst  a INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=";
+        String SQL_QueryDIYStore2_Count = "WHERE c.slsprs_id=";
+        String SQL_QueryDIYStore3_Count = "  And a.DIY='DIY' AND a.rec_sts_id=1 AND a.cat_type_id IN (1,2,3,6) ";
+        String sql_count = SQL_QueryDIYStore_Count + "'" + role_id + "'" + SQL_QueryDIYStore2_Count + "'" + slsprs_id + "'"
+                + SQL_QueryDIYStore3_Count;
+        logger.info(sql_count);*/
+        String SQL_QueryDIYStore_Count = new StringBuilder("SELECT count(*)")
+                .append(" FROM external_v_diy_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=").toString();
+        String SQL_QueryDIYStore0_Count = " LEFT JOIN [prc_v_citytype_new] m ON a.city_id=m.city_id AND m.yyyyqq='" + QuarterUtil.getCurrentQuarter() + "' ";
+        String SQL_QueryDIYStore2_Count = "WHERE c.slsprs_id=";
+        String seachSql = SQL_QueryDIYStore_Count + "'" + role_id + "'" + SQL_QueryDIYStore0_Count + SQL_QueryDIYStore2_Count + "'" + slsprs_id + "'";
+        logger.info(seachSql);
+        return toolsDao.sqlGetCount(seachSql);
+    }
+
+    @Override
+    public List QueryOEMStoreByPageNocity(String slsprs_id, String role_id, Page page) {
+        Assert.assertNotNull(slsprs_id);
+        Assert.assertNotNull(role_id);
+        String SQL_QueryOEMStore = new StringBuilder("SELECT a.[Store Name] as [Store Name], a.mall_addr as mall_addr,")
+                .append(" a.pht_pth as pht_pth, b.city_std_loc_nm as city_std_loc_nm,")
+                .append(" a.Brand as Brand, a.Category as Category, ")
+                .append(" a.[Store Telephone] as [Store Telephone],")
+                .append(" a.[Intel Store ID] as [Intel Store ID],")
+                .append(" a.[Store Manager Name] as [Store Manager Name],")
+                .append(" a.city_type_nm as city_type_nm, a.mall_nm as mall_nm,")
+                .append(" a.[Store Manager Email] as email, a.[Store Address] as [Store Address],")
+                .append(" case n.slsprs_id when '").append(slsprs_id).append("' then '")
+                .append(slsprs_id).append("' else '0' end as favourite, h.loc_latitude, h.loc_longitude ")
+//                .append(" ISNULL(n.slsprs_id, '0')  as favouriteSrId")
+                .append(" FROM external_v_xoem_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=").toString();
+//        String SQL_QueryDIYStore1_Count = " LEFT JOIN stdb_stor_slsprs_asgn n ON a.[Intel Store ID]=n.stor_id ";
+        String SQL_QueryDIYStore1_Count = " LEFT JOIN (select * from stdb_stor_slsprs_asgn m where  m.slsprs_id = '" + slsprs_id + "') n ON a.[Intel Store ID]=n.stor_id ";
+        String SQL_QueryDIYStore0_Count = " LEFT JOIN stdb_stor_loc h ON a.[Intel Store ID]=h.stor_id ";
+        String SQL_QueryDIYStore4_Count = " order by favourite desc ";
+        String sql = SQL_QueryOEMStore + "'" + role_id + "'"
+                + SQL_QueryDIYStore1_Count
+                + SQL_QueryDIYStore0_Count
+                + SQL_QueryOEMStore2 + "'"
+                + slsprs_id + "'" + " AND a.Category = 'High Touch' "
+                + SQL_QueryDIYStore4_Count;
+        logger.info(sql);
+        if (page == null) {
+            return toolsDao.sqlQueryResult(sql);
+        } else {
+            return toolsDao.sqlGetForPage(sql, page);
+        }
+    }
+
+    @Override
+    public int getOEMStoreCountNocity(String slsprs_id, String role_id) {
+        Assert.assertNotNull(slsprs_id);
+        String SQL_QueryOEMStore_Count = new StringBuilder("SELECT count(*)")
+                .append(" FROM external_v_xoem_stor_lst_mbl  a INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=").toString();
+        String SQL_QueryOEMStore2_Count = "WHERE c.slsprs_id=";
+        String sql_count = SQL_QueryOEMStore_Count + "'" + role_id + "'" + SQL_QueryOEMStore2_Count + "'" + slsprs_id + "'"
+                + " AND a.Category = 'High Touch' ";
+        logger.info(sql_count);
+        return toolsDao.sqlGetCount(sql_count);
+    }
+
+    @Override
+    public String QuerySRName(String slsprs_id) {
+        Assert.assertNotNull(slsprs_id);
+        String sql = SQL_QuerySRDetail + "'" + slsprs_id + "'";
+        logger.info(sql);
+        return toolsDao.sqlUtils(sql, "sr_name");
+    }
+
+    /**
+     * 根据条件统计DIY门店的个数
+     *
+     * @param slsprs_id sr唯一标示
+     * @param role_id   角色id
+     * @param store_nm  门店名称
+     * @param city      城市
+     * @return 统计个数
+     */
+    public int countDIYStore(String slsprs_id, String role_id, String store_nm, String city) {
+        Assert.assertNotNull(slsprs_id);
+        Assert.assertNotNull(role_id);
+        Assert.assertNotNull(store_nm);
+        Assert.assertNotNull(city);
+        StringBuilder sqlBuilder = new StringBuilder("");
+        sqlBuilder.append("SELECT count(*) FROM external_v_diy_stor_lst_mbl  a  ")
+                .append(" INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id= '")
+                .append(role_id)
+                .append("' WHERE c.slsprs_id= '")
+                .append(slsprs_id).append("' ");
+//        if (store_nm != null && !store_nm.equals("")) {
+        sqlBuilder.append(" AND a.stor_nm LIKE ")
+                .append("'%")
+                .append(store_nm)
+                .append("%'");
+//        }
+        if (!city.equals("all")) {
+            sqlBuilder.append(" AND a.city_nm LIKE '")
+                    .append(city).append("%'");
+        }
+        logger.info(sqlBuilder.toString());
+        return toolsDao.sqlGetCount(sqlBuilder.toString());
+    }
+
+    /**
+     * 根据条件统计DIY门店的集合
+     *
+     * @param slsprs_id sr唯一标示
+     * @param role_id   角色id
+     * @param store_nm  门店名称
+     * @param city      城市
+     * @param page      分页传输对象
+     * @return 门店集合
+     */
+    public List listDIYStoreByPage(String slsprs_id, String role_id, String store_nm, String city, Page page) {
+        Assert.assertNotNull(slsprs_id);
+        Assert.assertNotNull(role_id);
+        Assert.assertNotNull(store_nm);
+        Assert.assertNotNull(city);
+        StringBuilder sqlBuilder = new StringBuilder("");
+        sqlBuilder.append("SELECT * FROM external_v_diy_stor_lst_mbl  a  ")
+                .append(" INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id= '")
+                .append(role_id)
+                .append("' WHERE c.slsprs_id= '")
+                .append(slsprs_id).append("' ");
+//        if (store_nm != null && !store_nm.equals("")) {
+        sqlBuilder.append(" AND a.stor_nm LIKE ")
+                .append("'%")
+                .append(store_nm)
+                .append("%'");
+//        }
+        if (!city.equals("all")) {
+            sqlBuilder.append(" AND a.city_nm LIKE '")
+                    .append(city).append("%'");
+        }
+        logger.info(sqlBuilder.toString());
+        return toolsDao.sqlGetForPage(sqlBuilder.toString(), page);
+    }
+
+    /**
+     * 根据条件查询OEM门店个数
+     *
+     * @param slsprs_id sr唯一标示
+     * @param role_id   角色id
+     * @param store_nm  门店名称
+     * @param city      城市
+     * @return OEM门店查询个数
+     */
+    public int countOEMStore(String slsprs_id, String role_id, String store_nm, String city) {
+        Assert.assertNotNull(slsprs_id);
+        Assert.assertNotNull(role_id);
+        Assert.assertNotNull(store_nm);
+        Assert.assertNotNull(city);
+
+        StringBuilder sqlBuilder = new StringBuilder("");
+        sqlBuilder.append("SELECT count(*) FROM external_v_xoem_stor_lst_mbl  a   ")
+                .append(" INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id= '")
+                .append(role_id)
+                .append("' WHERE c.slsprs_id= '")
+                .append(slsprs_id).append("' ")
+                .append(" AND a.Category = 'High Touch'");
+
+
+//        if (store_nm != null && !store_nm.equals("")) {
+        sqlBuilder.append(" AND a.[Store Name] LIKE ")
+                .append("'%")
+                .append(store_nm)
+                .append("%'");
+//        }
+        if (!city.equals("all")) {
+            sqlBuilder.append(" AND a.city LIKE '")
+                    .append(city).append("%'");
+        }
+        logger.info(sqlBuilder.toString());
+        return toolsDao.sqlGetCount(sqlBuilder.toString());
+    }
+
+    /**
+     * 根据条件查询OEM门店集合
+     *
+     * @param slsprs_id sr唯一标示
+     * @param role_id   角色id
+     * @param store_nm  门店名称
+     * @param city      城市
+     * @param page      分页条件
+     * @return OEM门店集合
+     */
+    public List listOEMStoreByPage(String slsprs_id, String role_id, String store_nm, String city, Page page) {
+        Assert.assertNotNull(slsprs_id);
+        Assert.assertNotNull(role_id);
+        Assert.assertNotNull(store_nm);
+        Assert.assertNotNull(city);
+
+        StringBuilder sqlBuilder = new StringBuilder("");
+        sqlBuilder.append("SELECT * FROM external_v_xoem_stor_lst_mbl  a   ")
+                .append(" INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id= '")
+                .append(role_id)
+                .append("' WHERE c.slsprs_id= '")
+                .append(slsprs_id).append("' ")
+                .append(" AND a.Category = 'High Touch'");
+//        if (store_nm != null && !store_nm.equals("")) {
+        sqlBuilder.append(" AND a.[Store Name] LIKE ")
+                .append("'%")
+                .append(store_nm)
+                .append("%'");
+//        }
+        if (!city.equals("all")) {
+            sqlBuilder.append(" AND a.city LIKE '")
+                    .append(city).append("%'");
+        }
+        logger.info(sqlBuilder.toString());
+        return toolsDao.sqlGetForPage(sqlBuilder.toString(), page);
+    }
+
+    @Override
+    public List<JSONObject> getOEMProductList() {
+
+        logger.info(SQL_QueryOEMProduct);
+        return toolsDao.sqlQueryResult(SQL_QueryOEMProduct);
+    }
+
+    @Override
+    public List<JSONObject> getOEMModelList(String prd_cat_id, String brnd_id) {
+        String sql = SQL_QueryOEMModel + wenhao + "AND brnd_id =" + wenhao;
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{prd_cat_id, brnd_id});
+    }
+
+    @Override
+    public List<JSONObject> getOEMBrandList(String prd_cat_id) {
+        String sql = SQL_QueryOEMBrand + wenhao;
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{prd_cat_id});
+    }
+
+    @Override
+    public List<JSONObject> queryStoreBonus(String stor_id) {
+//        StringBuilder sqlBuilder = new StringBuilder("");
+//        sqlBuilder.append("SELECT * FROM view_store_bonus a WHERE a.stor_id =").append(stor_id);
+//        logger.info(sqlBuilder.toString());
+        String sql = "SELECT * FROM view_store_bonus a WHERE a.stor_id = ?";
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{stor_id});
+    }
+
+    @Override
+    public List<JSONObject> queryDIYSalesData(String stor_id, List<String> quarterList) {
+        StringBuilder sqlBuilder = new StringBuilder("");
+        StringBuilder quarterBuilder = new StringBuilder("");
+        for (int i = 0; i < quarterList.size(); i++) {
+            quarterBuilder.append(quarterList.get(i));
+            if (i != quarterList.size() - 1) {
+                quarterBuilder.append(",");
+            }
+        }
+        sqlBuilder.append("SELECT yyyyqq, Stor_id, City_type, por_name, POr, ")
+                .append(" SO, high_end_por_name, High_end_por,  High_end_SO")
+                .append(" FROM Mobile_SO_Por a WHERE a.stor_id =")
+                .append(stor_id)
+                .append(" AND a.yyyyqq in (")
+                .append(quarterBuilder)
+                .append(") ORDER BY a.yyyyqq");
+        logger.info(sqlBuilder.toString());
+        return toolsDao.sqlQueryResult4SalesData(sqlBuilder.toString());
+    }
+
+    @Override
+    public List QueryProductList(String product) {
+        String sql = "select * from view_msp_xoem_product_list";
+        logger.info(sql);
+        return toolsDao.sqlQueryResult(sql);
+    }
+
+    /**
+     * 查询diy门店详细信息
+     *
+     * @param role_id
+     * @param store_id
+     * @return
+     */
+    public List queryDIYStoreDetail(String role_id, String store_id) {
+        Assert.assertNotNull(role_id);
+        Assert.assertNotNull(store_id);
+        String SQL_QueryDIY_Detail1 = new StringBuilder("SELECT distinct a.*, ISNULL(n.slsprs_id, '0') AS favourite")
+                .append(" FROM external_v_diy_stor_lst_mbl  a ")
+                .append(" INNER JOIN external_v_slsprs_city_asgn b ON a.city_id=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=").toString();
+        String SQL_QueryDIY_Detail2 = " WHERE a.stor_id=";
+        StringBuilder sqlBuilder = new StringBuilder();
+        sqlBuilder.append(SQL_QueryDIY_Detail1).append(role_id)
+                .append(" LEFT JOIN stdb_stor_slsprs_asgn n ON a.stor_id=n.stor_id")
+                .append(SQL_QueryDIY_Detail2).append(store_id);
+        logger.info(sqlBuilder.toString());
+        return toolsDao.sqlQueryResult(sqlBuilder.toString());
+    }
+
+    /**
+     * 查询oem店相信情况
+     *
+     * @param role_id
+     * @param store_id
+     * @return
+     */
+    public List queryOEMStoreDetail(String role_id, String store_id) {
+        Assert.assertNotNull(role_id);
+        Assert.assertNotNull(store_id);
+        String SQL_QueryOEM_Detail1 = new StringBuilder("SELECT distinct a.* , ISNULL(n.slsprs_id, '0') AS favourite")
+                .append(" FROM external_v_xoem_stor_lst_mbl  a ")
+                .append(" INNER JOIN external_v_slsprs_city_asgn b ON a.[City ID]=b.city_id ")
+                .append(" INNER JOIN vw_mip_role_user c ON b.slsprs_id=c.slsprs_id AND rl_id=").toString();
+        String SQL_QueryOEM_Detail2 = " WHERE a.[Intel Store ID]=";
+        StringBuilder sqlBuilder = new StringBuilder();
+        sqlBuilder.append(SQL_QueryOEM_Detail1).append(role_id)
+                .append(" LEFT JOIN stdb_stor_slsprs_asgn n ON a.[Intel Store ID]=n.stor_id")
+                .append(SQL_QueryOEM_Detail2).append(store_id);
+        logger.info(sqlBuilder.toString());
+        return toolsDao.sqlQueryResult(sqlBuilder.toString());
+    }
+
+    /**
+     * 根据类别查询
+     *
+     * @param pht_cat
+     * @return
+     */
+    public List queryComPhotoCat(String pht_cat) {
+        String sql = "SELECT *  from msp_pht_cat WHERE pht_cat= ?";
+        logger.info(sql);
+        return baseDao.sqlQueryResult(sql, new Object[]{pht_cat});
+    }
+
+    /**
+     * 根据添加收藏
+     *
+     * @param stor_id ，slsprs_id
+     * @return
+     */
+    @Override
+    public String addFavourite(String stor_id, String slsprs_id, String slsprs_id1, String last_update_time) {
+        String sql = "insert into stdb_stor_slsprs_asgn(stor_id,slsprs_id,last_upd_usr_id,last_upd_dtm) values (" + "'" + stor_id + "'," + "'" + slsprs_id + "'," + "'" + slsprs_id + "'," + "'" + last_update_time + "')";
+        logger.info("addFavourite:" + sql);
+        return toolsDao.insertUtils(sql);
+    }
+
+    /**
+     * 根据取消收藏
+     *
+     * @param stor_id
+     * @return
+     */
+    @Override
+    public String delFavourite(String stor_id, String slsprs_id) {
+        String sql = "DELETE  from stdb_stor_slsprs_asgn WHERE stor_id=" + "'" + stor_id + "'" + "and slsprs_id=" + "'" + slsprs_id + "'";
+        logger.info("delFavourite:" + sql);
+        return toolsDao.insertUtils(sql);
+    }
+
+    @Override
+    public List<JSONObject> queryPushData(String slsprs_id) {
+        String sql = new StringBuilder("select a.*, b.msg_type_id, b.msg_type_nm ")
+                .append(" from prc_msg a, prc_msg_type b where a.last_upd_usr_id ='")
+                .append(slsprs_id).append("' AND a.msg_type_id = b.msg_type_id")
+                .append(" AND datepart(quarter,GETDATE()) = datepart(quarter, a.last_upd_dtm)")
+                .toString();
+        logger.info(sql);
+        return toolsDao.sqlQueryResult(sql);
+    }
+
+    /**
+     * 查询图片上传日期
+     *
+     * @param slsprs_id
+     * @return
+     */
+    @Deprecated
+    public List<JSONObject> queryPicDateFile(String slsprs_id, String stor_id) {
+        String sql = new StringBuilder("select  DISTINCT CONVERT(varchar(100), a.last_upd_dtm, 112) ")
+                .append(" as last_upd_dtm, count(a.pic_id) as pic_count ")
+                .append(" from msp_stor_pic a where a.last_upd_usr_id = '")
+                .append(slsprs_id).append("' AND a.last_upd_dtm>=DATEADD(mm,-6,GETDATE())")
+                .append(" AND a.stor_id='").append(stor_id).append("'")
+                .append(" group by CONVERT (VARCHAR (100),a.last_upd_dtm,112)")
+                .append(" ORDER BY last_upd_dtm DESC").toString();
+        logger.info(sql);
+        return this.toolsDao.sqlQueryResult(sql);
+    }
+
+    @Override
+    public List<JSONObject> queryPicByDate(String last_upd_dtm, String stor_id) {
+        String sql = new StringBuilder("SELECT b.pht_cat_nm as pht_cat_nm, a.pic_id as pic_id,")
+                .append(" a.stor_id as stor_id, a.wv_id as wv_id,")
+                .append(" a.pht_pth as pht_pth, a.pht_cat as pht_cat,")
+                .append(" a.last_upd_usr_id as last_upd_usr_id,")
+                .append(" a.cmnts as cmnts, a.last_upd_dtm as last_upd_dtm")
+                .append(" FROM msp_stor_pic  a ")
+                .append(" LEFT JOIN dbo.msp_pht_cat b ON a.pht_cat=b.pht_cat ")
+                .append(" WHERE a.last_upd_dtm>=DATEADD(mm,-6,GETDATE())")
+                .append(" AND CONVERT(varchar(100), a.last_upd_dtm, 112) = '")
+                .append(last_upd_dtm).append("' and a.stor_id='").append(stor_id).append("'")
+                .append(" ORDER BY a.last_upd_dtm desc").toString();
+        logger.info(sql);
+        return this.toolsDao.sqlQueryResult(sql);
+    }
+
+    @Override
+    public List<JSONObject> queryPicDateFile4Store(String stor_id) {
+        String sql = new StringBuilder("select  DISTINCT CONVERT(varchar(100), a.last_upd_dtm, 112) ")
+                .append(" as last_upd_dtm, count(a.pic_id) as pic_count ")
+                .append(" from msp_stor_pic a  ")
+                .append(" where a.last_upd_dtm>=DATEADD(mm,-6,GETDATE())")
+                .append(" AND a.stor_id='").append(stor_id).append("'")
+                .append(" group by CONVERT (VARCHAR (100),a.last_upd_dtm,112)")
+                .append(" ORDER BY last_upd_dtm DESC").toString();
+        logger.info(sql);
+        return this.toolsDao.sqlQueryResult(sql);
+    }
+
+    /**
+     * 根据图片日期查询图片
+     *
+     * @param slsprs_id
+     * @param last_upd_dtm
+     * @return
+     */
+    @Deprecated
+    public List<JSONObject> queryPicByDate(String slsprs_id, String last_upd_dtm, String stor_id) {
+        String sql = new StringBuilder("SELECT b.pht_cat_nm as pht_cat_nm, a.pic_id as pic_id,")
+                .append(" a.stor_id as stor_id, a.wv_id as wv_id,")
+                .append(" a.pht_pth as pht_pth, a.pht_cat as pht_cat,")
+                .append(" a.last_upd_usr_id as last_upd_usr_id,")
+                .append(" a.cmnts as cmnts, a.last_upd_dtm as last_upd_dtm")
+                .append(" FROM msp_stor_pic  a ")
+                .append(" LEFT JOIN dbo.msp_pht_cat b ON a.pht_cat=b.pht_cat ")
+                .append(" WHERE a.last_upd_usr_id = '").append(slsprs_id)
+                .append("' AND a.last_upd_dtm>=DATEADD(mm,-6,GETDATE())")
+                .append(" AND CONVERT(varchar(100), a.last_upd_dtm, 112) = '")
+                .append(last_upd_dtm).append("' and a.stor_id='").append(stor_id).append("'")
+                .append(" ORDER BY a.last_upd_dtm desc").toString();
+        logger.info(sql);
+        return this.toolsDao.sqlQueryResult(sql);
+    }
+
+    @Override
+    public List<JSONObject> queryCPU(String cpu_id) {
+        String sql = "SELECT  a.rtl_box_sn ,\n" +
+                "        b.pcsr_nbr ,\n" +
+                "        b.extrnl_prd_nm, b.sku_speed\n" +
+                "FROM    dbo.cbt_prc_rtl_box_sn a\n" +
+                "        LEFT JOIN v_prd b ON a.mtrl_id = b.mtrl_id\n" +
+                "WHERE   a.rtl_box_sn = '" + cpu_id + "'";
+        logger.info("queryCPU:" + sql);
+        return this.toolsDao.sqlQueryResult(sql);
+    }
+
+    @Override
+    public List<JSONObject> queryNote(String store_id, String slsprs_id) {
+        String sql = new StringBuilder("SELECT * FROM dbo.prc_mbl_notes")
+                .append(" WHERE store_id =? and slsprs_id =?")
+                .append(" ORDER BY lst_upd_dtm DESC").toString();
+        logger.info("queryNote:" + sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{Integer.valueOf(store_id), Integer.valueOf(slsprs_id)});
+    }
+
+    @Override
+    public void createNote(String store_id, String slsprs_id, String title, String content) {
+        String sql = new StringBuilder("insert into prc_mbl_notes(store_id,title,content,lst_upd_dtm,slsprs_id)")
+                .append("  values(?, ?, ?, GETDATE(), ?)").toString();
+        logger.info("createNote:" + sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{Integer.valueOf(store_id), title, content,
+                Integer.valueOf(slsprs_id)});
+    }
+
+    @Override
+    public void delNote(String note_id) {
+        String sql = new StringBuilder("DELETE FROM dbo.prc_mbl_notes")
+                .append(" WHERE note_id =?").toString();
+        logger.info("delNote:" + sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{Integer.valueOf(note_id)});
+    }
+
+    @Override
+    public void modifyNote(String note_id, String title, String content) {
+        StringBuilder sql = new StringBuilder("UPDATE dbo.prc_mbl_notes")
+                .append(" SET content =?, title =?")
+                .append(" WHERE note_id =?");
+        logger.info("modifyNote:" + sql);
+        this.baseDao.executeDdlSql(sql.toString(), new Object[]{content, title, Integer.valueOf(note_id)});
+    }
+
+    @Override
+    public List<JSONObject> queryWaveDeadline() {
+        String sql = new StringBuilder("SELECT * FROM msp_wv")
+                .append(" WHERE wv_type_id IN (1, 2, 4)")
+                .append(" AND yyyyqq ='").append(QuarterUtil.getCurrentQuarter()).append("'")
+                .append(" ORDER BY wv_type_id, wv_end_dt").toString();
+        logger.info("queryWaveDeadline:" + sql);
+        return this.toolsDao.sqlQueryResult(sql);
+    }
+
+    @Override
+    public String pwdSearch(String type, String login_id, String isUat) {
+        String result = "";
+        String sql = "";
+        if ("sr".equalsIgnoreCase(type)) {
+            sql = "SELECT * FROM dbo.view_sr_profile WHERE login_id='" + login_id + "'";
+            if ("prod".equals(isUat)) {
+                result = imageUploadDao.sqlUtils(sql, "log_pwd");
+            } else if ("uat".equals(isUat)) {
+                result = toolsDao.sqlUtils(sql, "log_pwd");
+            } else if ("awsProd".equals(isUat)) {
+                result = awsProdDao.sqlUtils(sql, "log_pwd");
+            } else {
+                return "the parameters are wrong!";
+            }
+        } else if ("rsp".equalsIgnoreCase(type)) {
+            sql = "SELECT * FROM external_v_stor_rep_lst WHERE rep_tel='" + login_id + "' and rec_sts_id = 1";
+            if ("prod".equals(isUat)) {
+                result = imageUploadDao.sqlUtils(sql, "log_pwd");
+            } else if ("uat".equals(isUat)) {
+                result = toolsDao.sqlUtils(sql, "log_pwd");
+            } else if ("awsProd".equals(isUat)) {
+                result = awsProdDao.sqlUtils(sql, "log_pwd");
+            } else {
+                return "the parameters are wrong!";
+            }
+        } else {
+            return "the parameters are wrong!";
+        }
+        result = RC2Encryptor.decrypt(result);
+        if ("error".equals(result)) {
+            return "the login account does not exist!";
+        }
+        return result;
+    }
+
+    @Override
+    @Cacheable(value = "commonCache", key = "'allCity'")
+    public List<SerializableJSONObject> listAllCity() {
+        String sql = "SELECT distinct city_id, city_std_loc_nm FROM external_v_slsprs_city_asgn ";
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult4Cache(sql);
+    }
+
+    @Override
+    @Cacheable(value = "sessionCache", key = "#sessionId + 'getSession'")
+    public ClientSession getSession(String sessionId) throws JSONException {
+        String sql = "select * from prc_mbl_session a where a.session_id = ?";
+        List<SerializableJSONObject> result = this.baseDao.sqlQueryResult4Cache(sql, new Object[]{sessionId});
+        if (result == null || result.size() == 0) {
+            throw new SessionTimeoutException("会话不存在，请重新登陆！", Consts.SESSIONTIMEOUT_ERROR_CODE);
+        }
+        return new ClientSession(result.get(0));
+    }
+
+    @Override
+    @CacheEvict(value = "sessionCache", key = "#sessionId + 'getSession'")
+    public void clearSession(String sessionId) {
+        String sql = "delete from prc_mbl_session where session_id = ?";
+        this.baseDao.executeDdlSql(sql, new Object[]{sessionId});
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void saveSessionInfo(String sessionId) {
+        String sql = new StringBuilder("insert into prc_mbl_session(session_id, ")
+                .append(" cre_dtm) values(?, GETDATE())").toString();
+        this.baseDao.executeDdlSql(sql, new Object[]{sessionId});
+    }
+
+    @Override
+    public List<JSONObject> listStoreDecoration(int sr_id) {
+        String sql = new StringBuilder("SELECT * FROM msp_chg_req WHERE last_upd_usr_id=" + sr_id + " and chg_req_type_id=2 and rec_sts_id=1 AND cre_dtm>=DATEADD(mm,-12,GETDATE()) ORDER BY cre_dtm DESC ").toString();
+        logger.info("listStoreDecoration:" + sql);
+        return this.baseDao.sqlQueryResult(sql);
+    }
+
+    @Override
+    public void deleteStoreDecoration(int chg_req_id) {
+        String check = "SELECT * FROM msp_chg_req WHERE  chg_req_id=? AND chg_req_type_id=2";
+        String sts_id = this.baseDao.sqlUtils(check, "fnl_appr_sts_id", new Object[]{chg_req_id});
+        if (Integer.valueOf(sts_id) != 0) {
+            throw new OperateFailureException("该店面申请正在审批中，无法删除。");
+        }
+        String sql = "UPDATE msp_chg_req SET rec_sts_id=-1 WHERE  chg_req_id=? AND chg_req_type_id=2";
+        logger.info("deleteStoreDecoration:" + sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{chg_req_id});
+    }
+
+    @Override
+    public void addStoreDecoration(String stor_id, String eff_dt, String exp_dt, int cre_usr_id, String pic_url, String loc_longitude, String loc_latitude, String loc_addr) {
+        String sql = "INSERT INTO msp_chg_req ( chg_req_type_id, stor_id, co_id, nm, addr, eff_dt, exp_dt, rec_sts_id, cre_usr_id, cre_dtm, last_upd_usr_id, last_upd_dtm, app_sts_id, appr_usr_id, appr_dtm, fnl_appr_sts_id, fnl_appr_usr_id, fnl_appr_dtm, pic_url, loc_longitude, loc_latitude, loc_addr ) VALUES ( 2, ?, NULL, NULL, NULL, ?, ?, 1, ?, GETDATE(), ?, GETDATE(), NULL, NULL, NULL, 0, NULL, NULL , ? , ?, ?, ?)";
+        logger.info("addStoreDecoration:" + sql);
+        if (stor_id.contains(",")) {
+            String[] idtemp = stor_id.split(",");
+            for (String id : idtemp) {
+                this.baseDao.executeDdlSql(sql, new Object[]{id, eff_dt, exp_dt, cre_usr_id, cre_usr_id, pic_url, loc_longitude, loc_latitude, loc_addr});
+            }
+        } else
+            this.baseDao.executeDdlSql(sql, new Object[]{stor_id, eff_dt, exp_dt, cre_usr_id, cre_usr_id,pic_url, loc_longitude, loc_latitude, loc_addr});
+    }
+
+    @Override
+    public void recordStorModifyMsg(int stor_id, String nm, String addr, int cre_usr_id,  String pic_url, String loc_longitude, String loc_latitude, String loc_addr) throws JSONException {
+        String sqlStr = new StringBuilder("select chg_req_type_id from msp_chg_req_type where chg_req_type_nm = 'Store Name/Addr update' ").toString();
+        logger.info(sqlStr);
+        List<JSONObject> list = this.baseDao.sqlQueryResult(sqlStr);
+        int chg_req_type_id = list.get(0).getInt("chg_req_type_id");
+        String sql = new StringBuilder("INSERT INTO msp_chg_req ( chg_req_type_id,stor_id,nm,addr,rec_sts_id,cre_usr_id,")
+                .append("cre_dtm, last_upd_usr_id, last_upd_dtm , fnl_appr_sts_id,  pic_url, loc_longitude, loc_latitude, loc_addr) ")
+                .append("VALUES(?, ?, ?, ?, 1 , ?, getDate() , ?, getDate(), 0, ?, ?, ?, ?)").toString();
+        logger.info(sql);
+        this.baseDao.executeDdlSql(sql, new Object[]{chg_req_type_id, stor_id, nm, addr, cre_usr_id, cre_usr_id, pic_url, loc_longitude, loc_latitude, loc_addr});
+    }
+
+    @Override
+    public List<JSONObject> listStorModifyMsg(int stor_id) throws JSONException{
+        String sqlStr = new StringBuilder("select chg_req_type_id from msp_chg_req_type where chg_req_type_nm = 'Store Name/Addr update' ").toString();
+        logger.info(sqlStr);
+        List<JSONObject> list = this.baseDao.sqlQueryResult(sqlStr);
+        int chg_req_type_id = list.get(0).getInt("chg_req_type_id");
+        String sql = new StringBuilder("select * from msp_chg_req where stor_id = ? and  last_upd_dtm between dateadd(dd,-365,getdate()) and getDate() and rec_sts_id =1 and chg_req_type_id = ?")
+                .append(" order by last_upd_dtm desc").toString();
+        logger.info(sql);
+        return this.baseDao.sqlQueryResult(sql, new Object[]{stor_id, chg_req_type_id});
+    }
+
+    @Override
+    public void deleteStorModifyMsg(int chg_req_id) throws JSONException {
+        String querySql = new StringBuilder("select chg_req_type_id from msp_chg_req_type where chg_req_type_nm = 'Store Name/Addr update' ").toString();
+        logger.info(querySql);
+        List<JSONObject> result = this.baseDao.sqlQueryResult(querySql);
+        int chg_req_type_id = result.get(0).getInt("chg_req_type_id");
+        String sqlStr = new StringBuilder("select fnl_appr_sts_id from msp_chg_req where chg_req_id = ? and chg_req_type_id = ?").toString();
+        logger.info(sqlStr);
+        List<JSONObject> list = this.baseDao.sqlQueryResult(sqlStr, new Object[]{chg_req_id, chg_req_type_id});
+        if(list==null||list.size()==0){
+            throw new OperateFailureException("您所要删除的记录不存在。");
+        }
+        int fnl_appr_sts_id = list.get(0).getInt("fnl_appr_sts_id");
+        if (fnl_appr_sts_id != 0) {
+            throw new OperateFailureException("该店面申请正在审批中或已经审批，无法删除。");
+        }
+        String sql = new StringBuilder("update msp_chg_req  set rec_sts_id = -1 where chg_req_id = ? and chg_req_type_id =?").toString();
+        this.baseDao.executeDdlSql(sql, new Object[]{chg_req_id, chg_req_type_id});
+    }
+}
+
