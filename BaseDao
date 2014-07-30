@@ -1,0 +1,340 @@
+package com.intel.store.dao;
+
+
+import com.google.common.base.Joiner;
+import com.intel.store.common.SerializableJSONObject;
+import com.intel.store.exception.OperateFailureException;
+import org.apache.commons.lang.StringUtils;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.PreparedStatementCallback;
+import org.springframework.jdbc.core.support.JdbcDaoSupport;
+
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Created with maxiaolong
+ * User: P0031372
+ * Date: 13-8-8
+ * Time: 下午3:24.
+ */
+public class BaseDao extends JdbcDaoSupport {
+
+    private static Logger logger = LoggerFactory.getLogger(BaseDao.class);
+
+    /**
+     * 根据sql查询某个字段的值
+     *
+     * @param sql
+     * @param sqlKey
+     * @return
+     */
+    public String sqlUtils(final String sql, final String sqlKey, final Object[] paramsArray) {
+
+        return this.getJdbcTemplate().execute(sql, new PreparedStatementCallback<String>() {
+            @Override
+            public String doInPreparedStatement(PreparedStatement pstmt)
+                    throws SQLException, DataAccessException {
+                for (int i = 0; i < paramsArray.length; i++) {
+                    pstmt.setObject(i + 1, paramsArray[i]);
+                }
+                ResultSet rs = pstmt.executeQuery();
+                if (rs.next()) {
+                    return rs.getString(sqlKey);
+                }
+                return null;
+            }
+        });
+    }
+
+    /**
+     * 根据sql语句查询结果集（此方法是为了 不需要传入参数sql方便使用，不要把参数拼入sql）
+     *
+     * @param sql
+     * @return
+     */
+    public List<JSONObject> sqlQueryResult(final String sql) {
+        return this.sqlQueryResult(sql, new Object[]{});
+    }
+
+    /**
+     * 根据sql语句查询结果集（此方法是为了 不需要传入参数sql方便使用，不要把参数拼入sql） cache
+     *
+     * @param sql
+     * @return
+     */
+    public List<SerializableJSONObject> sqlQueryResult4Cache(final String sql) {
+        return this.sqlQueryResult4Cache(sql, new Object[]{});
+    }
+
+    /**
+     * 根据sql语句查询结果集（建议使用，效率高）
+     *
+     * @param sql
+     * @param paramsArray
+     * @return
+     */
+    public List<JSONObject> sqlQueryResult(final String sql, final Object[] paramsArray) {
+
+        return this.getJdbcTemplate().execute(sql, new PreparedStatementCallback<List<JSONObject>>() {
+            @Override
+            public List<JSONObject> doInPreparedStatement(PreparedStatement pstmt)
+                    throws SQLException, DataAccessException {
+                for (int i = 0; i < paramsArray.length; i++) {
+                    pstmt.setObject(i + 1, paramsArray[i]);
+                }
+                ResultSet rs = pstmt.executeQuery();
+                return convert(rs);
+            }
+        });
+    }
+
+    /**
+     *  查询结果集 cache
+     * @param sql
+     * @param paramsArray
+     * @return
+     */
+    public List<SerializableJSONObject> sqlQueryResult4Cache(final String sql, final Object[] paramsArray) {
+
+        return this.getJdbcTemplate().execute(sql, new PreparedStatementCallback<List<SerializableJSONObject>>() {
+            @Override
+            public List<SerializableJSONObject> doInPreparedStatement(PreparedStatement pstmt)
+                    throws SQLException, DataAccessException {
+                for (int i = 0; i < paramsArray.length; i++) {
+                    pstmt.setObject(i + 1, paramsArray[i]);
+                }
+                ResultSet rs = pstmt.executeQuery();
+                return convert4Cache(rs);
+            }
+        });
+    }
+
+    /**
+     *  查询结果集 cache， 此操作支持in操作设值
+     * @param sql
+     * @param paramsArray
+     * @return
+     */
+    public List<SerializableJSONObject> sqlQueryResult4Cache(final String sql, final Object[] paramsArray,
+                                                             final Object[] inParamArray) {
+
+        return this.getJdbcTemplate().execute(sql, new PreparedStatementCallback<List<SerializableJSONObject>>() {
+            @Override
+            public List<SerializableJSONObject> doInPreparedStatement(PreparedStatement pstmt)
+                    throws SQLException, DataAccessException {
+                int index = 1;
+                if (paramsArray != null && paramsArray.length != 0) {
+                    for ( int i = 0; i < paramsArray.length; i++) {
+                        pstmt.setObject(index, paramsArray[i]);
+                        index ++;
+                    }
+                }
+
+                if (inParamArray != null && inParamArray.length != 0) {
+                    for (int j = 0; j < inParamArray.length;  j++) {
+                        pstmt.setObject(index, inParamArray[j]);
+                        index ++;
+                    }
+                }
+                ResultSet rs = pstmt.executeQuery();
+                return convert4Cache(rs);
+            }
+        });
+    }
+
+    /**
+     *  返回查询结果为object数组
+     * @param sql
+     * @param paramsArray
+     * @return
+     */
+    public List<Object[]> sqlQueryObjArrayResult(final String sql, final Object[] paramsArray) {
+
+        return this.getJdbcTemplate().execute(sql, new PreparedStatementCallback<List<Object[]>>() {
+            @Override
+            public List<Object[]> doInPreparedStatement(PreparedStatement pstmt)
+                    throws SQLException, DataAccessException {
+                for (int i = 0; i < paramsArray.length; i++) {
+                    pstmt.setObject(i + 1, paramsArray[i]);
+                }
+                ResultSet rs = pstmt.executeQuery();
+                return BaseDao.this.parseResultSet(rs);
+            }
+        });
+    }
+
+    /**
+     * 转换结果集
+     *
+     * @param rs
+     * @return
+     */
+    public List<JSONObject> convert(ResultSet rs) throws SQLException {
+        List<JSONObject> retList = new ArrayList<JSONObject>();
+        ResultSetMetaData meta = rs.getMetaData();
+        int colCount = meta.getColumnCount();
+        while (rs.next()) {
+            JSONObject subData = new JSONObject();
+            for (int i = 1; i <= colCount; i++) {
+                String name = meta.getColumnName(i);
+                Object value = rs.getObject(i);
+                try {
+                    if (value == null) {
+                        if (meta.getColumnType(i) == Types.INTEGER) {
+                            value = new Integer(-1);
+                        } else {
+                            value = "";
+                        }
+
+                    }
+                    subData.put(name, value);
+                } catch (JSONException e) {
+                    logger.error("jason parseToMap failed", e);
+                }
+
+            }
+            retList.add(subData);
+        }
+        return retList;
+    }
+
+    /**
+     * 转换结果集
+     *
+     * @param rs
+     * @return
+     */
+    public List<SerializableJSONObject> convert4Cache(ResultSet rs) throws SQLException {
+        List<SerializableJSONObject> retList = new ArrayList<SerializableJSONObject>();
+        ResultSetMetaData meta = rs.getMetaData();
+        int colCount = meta.getColumnCount();
+        while (rs.next()) {
+            SerializableJSONObject subData = new SerializableJSONObject();
+            for (int i = 1; i <= colCount; i++) {
+                String name = meta.getColumnName(i);
+                Object value = rs.getObject(i);
+                try {
+                    if (value == null) {
+                        if (meta.getColumnType(i) == Types.INTEGER) {
+                            value = new Integer(-1);
+                        } else {
+                            value = "";
+                        }
+
+                    }
+                    subData.put(name, value);
+                } catch (JSONException e) {
+                    logger.error("jason parseToMap failed", e);
+                }
+
+            }
+            retList.add(subData);
+        }
+        return retList;
+    }
+
+    /**
+     * 向数据库执行ddl语句（insert,update, delete语句)
+     *
+     * @param sql
+     * @param paramsArray
+     */
+    public void executeDdlSql(String sql, final Object[] paramsArray) {
+        this.getJdbcTemplate().execute(sql, new PreparedStatementCallback<Object>() {
+            @Override
+            public Object doInPreparedStatement(PreparedStatement pstmt)
+                    throws SQLException, DataAccessException {
+                for (int i = 0; i < paramsArray.length; i++) {
+                    pstmt.setObject(i + 1, paramsArray[i]);
+                }
+                return pstmt.executeUpdate();
+            }
+        });
+    }
+
+    public String executeDdlSql(String sql) {
+        this.executeDdlSql(sql, new Object[]{});
+        return "success";
+    }
+
+    /**
+     * 插入记录并返回生成主键
+     *
+     * @param sql
+     * @param paramsArray
+     */
+    public Object insertReturnPrimaryKey(final String sql, final Object[] paramsArray) {
+        return this.getJdbcTemplate().execute(new ConnectionCallback<Object>() {
+            @Override
+            public Object doInConnection(Connection connection)
+                    throws SQLException, DataAccessException {
+                PreparedStatement pstmt = connection.prepareStatement(sql, PreparedStatement.RETURN_GENERATED_KEYS);
+                for (int i = 0; i < paramsArray.length; i++) {
+                    pstmt.setObject(i + 1, paramsArray[i]);
+                }
+                pstmt.executeUpdate();
+                ResultSet rs = pstmt.getGeneratedKeys();
+                if (rs.next()) {
+                    return rs.getObject(1);
+                }
+                throw new OperateFailureException("插入失败！");
+            }
+        });
+    }
+
+    /**
+     *  统计专用方法
+     * @param sql
+     * @param paramsArray
+     * @return
+     */
+    public int sqlCount(final String sql, final Object[] paramsArray) {
+        return this.getJdbcTemplate().execute(sql, new PreparedStatementCallback<Integer>(){
+
+            @Override
+            public Integer doInPreparedStatement(PreparedStatement pstmt)
+                    throws SQLException, DataAccessException {
+                for (int i = 0; i < paramsArray.length; i++) {
+                    pstmt.setObject(i + 1, paramsArray[i]);
+                }
+                ResultSet  rs = pstmt.executeQuery();
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+                return null;
+            }
+        });
+    }
+
+    /**
+     *  把数据库结果集转换成object数组
+     * @param rs
+     * @return
+     */
+    public List<Object[]> parseResultSet(ResultSet rs) {
+        List<Object[]> retList = new ArrayList<Object[]>();
+        try {
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            while (rs.next()) {
+                JSONObject subData = new JSONObject();
+                Object[] objArray = new Object[colCount];
+                for (int i = 1; i <= colCount; i++) {
+                    objArray[i - 1] = rs.getObject(i);
+                }
+                retList.add(objArray);
+            }
+        } catch (SQLException ex) {
+            logger.error("can not convert result set to list of map", ex);
+        }
+        return retList;
+    }
+
+}
