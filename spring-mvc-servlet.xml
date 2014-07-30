@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+    xmlns:mvc="http://www.springframework.org/schema/mvc"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="
+        http://www.springframework.org/schema/beans
+        http://www.springframework.org/schema/beans/spring-beans.xsd
+        http://www.springframework.org/schema/mvc
+        http://www.springframework.org/schema/mvc/spring-mvc.xsd">
+
+	<bean id="urlMapping"
+	  class="org.springframework.web.servlet.handler.SimpleUrlHandlerMapping">
+	  <property name="mappings">
+	   <props>
+           <prop key="/**/storeMgmt/*.do">storeController</prop>
+           <prop key="/**/storeRspMgmt/*.do">storeRspController</prop>
+           <prop key="/**/storeLfrMgmt/*.do">storeLfrController</prop>
+           <prop key="/**/storeVsrMgmt/*.do">storeVsrController</prop>
+           <prop key="/**/newStoreRspMgmt/*.do">newStoreRspController</prop>
+	   </props>
+	  </property>
+	 </bean>	
+	 
+	 
+	<!-- 定义methodResolver -->
+	
+    <bean id="methodNameResolver"
+        class="org.springframework.web.servlet.mvc.multiaction.InternalPathMethodNameResolver" />
+	 
+	 <!-- 定义viewResolver -->
+	<bean id="viewResolver" class="org.springframework.web.servlet.view.InternalResourceViewResolver">
+		<property name="viewClass"  value="org.springframework.web.servlet.view.JstlView"/>
+		<property name="prefix" value="/"/>
+	   <property name="suffix" value=""/>
+	</bean> 
+	
+	<bean id="storeController" class="com.intel.store.controller.StoreController">
+		<property name="vstStoreServiceImpl" ref="vstStoreServiceImpl"></property>
+        <property name="storeServiceImpl" ref="storeServiceImpl"></property>
+	</bean>
+
+    <bean id="storeRspController" class="com.intel.store.controller.StoreRspController">
+        <property name="storeRspServiceImpl" ref="storeRspServiceImpl"></property>
+    </bean>
+
+    <bean id="storeLfrController" class="com.intel.store.controller.StoreLfrController">
+        <property name="storeLfrService" ref="storeLfrService"/>
+    </bean>
+
+    <bean id="storeVsrController" class="com.intel.store.controller.StoreVsrController">
+        <property name="storeVsrService" ref="storeVsrService"/>
+    </bean>
+
+    <bean id="newStoreRspController" class="com.intel.store.controller.NewStoreRspController">
+        <property name="storeRspService" ref="storeRspServiceImpl"/>
+    </bean>
+	
+</beans>
