@@ -1,0 +1,562 @@
+package com.intel.store.controller;
+
+import com.intel.store.common.Base64Utils;
+import com.intel.store.common.CommonUtils;
+import com.intel.store.common.SerializableJSONObject;
+import com.intel.store.common.WebUtils;
+import com.intel.store.exception.GenericException;
+import com.intel.store.exception.OperateFailureException;
+import com.intel.store.service.Interface.StoreRspService;
+import org.apache.commons.lang.StringUtils;
+import org.apache.log4j.Logger;
+import org.codehaus.jettison.json.JSONObject;
+import org.springframework.web.servlet.ModelAndView;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.util.Arrays;
+import java.util.List;
+
+/**
+ * 该类继承了BaseController， 异常的捕捉和处理，session超时验证都放到BaseController进行统一处理
+ */
+public class StoreRspController extends BaseController<StoreRspController> {
+
+    /**
+     * 日志工具
+     */
+    final Logger logger = Logger.getLogger(StoreRspController.class);
+
+    private StoreRspService storeRspServiceImpl;
+
+    StoreRspController() {
+        super();
+    }
+
+    public void setStoreRspServiceImpl(StoreRspService storeRspServiceImpl) {
+        this.storeRspServiceImpl = storeRspServiceImpl;
+    }
+
+    /**
+     * 门店Rsp登陆
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView login(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String username = WebUtils.getStringValue(request, "username", true);
+        if (StringUtils.isBlank(username)) {
+            throw new OperateFailureException("用户名不能为空！");
+        }
+        WebUtils.checkStrLength(username, 40);
+        String password = WebUtils.getStringValue(request, "password", true);
+        String iMei = WebUtils.getStringValue(request, "iMei", false);
+        String android_ID = WebUtils.getStringValue(request, "android_id", false);
+        JSONObject result = this.storeRspServiceImpl.findByNamePwd(username,
+                new String(Base64Utils.decode(password), "UTF-8"), iMei, android_ID);
+        jsonObject.put("data", result);
+        jsonObject.put("status", CommonUtils.getSubStatus("正常登陆！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 修改密码
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView modifyPwd(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String username = WebUtils.getStringValue(request, "username", true);
+        WebUtils.checkStrLength(username, 20);
+        String password = WebUtils.getStringValue(request, "password", true);
+        WebUtils.checkStrLength(password, 40);
+        String newPwd = WebUtils.getStringValue(request, "newPwd", true);
+        String iMei = WebUtils.getStringValue(request, "imei", false);
+        String android_ID = WebUtils.getStringValue(request, "android_id", false);
+        WebUtils.checkStrLength(newPwd, 40);
+        this.storeRspServiceImpl.modifyPwd(username,
+                new String(Base64Utils.decode(password), "UTF-8"),
+                new String(Base64Utils.decode(newPwd), "UTF-8"), iMei, android_ID);
+        jsonObject.put("status", CommonUtils.getSubStatus("密码修改成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView addRsp(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        WebUtils.isInteger(stor_id);
+        String rep_nm = new String(Base64Utils.decode(WebUtils.getStringValue(request, "rep_nm", true)), "UTF-8");
+        WebUtils.checkStrLength(rep_nm, 15);
+        String rep_tel = WebUtils.getStringValue(request, "rep_tel", true);
+        WebUtils.checkStrLength(rep_tel, 80);
+        String rep_email = new String(Base64Utils.decode(WebUtils.getStringValue(request, "rep_email", false)), "UTF-8");
+        if (!StringUtils.isBlank(rep_email)) {
+            WebUtils.checkStrLength(rep_email, 80);
+        }
+        String last_upd_usr_id = WebUtils.getStringValue(request, "last_upd_usr_id", true);
+        WebUtils.isInteger(last_upd_usr_id);
+        String rep_bank_nm = WebUtils.getStringValue(request, "rep_bank_nm", false);
+        if (!StringUtils.isBlank(rep_bank_nm)) {
+            WebUtils.checkStrLength(rep_bank_nm, 100);
+        }
+        String rep_bank_acct_nbr = WebUtils.getStringValue(request, "rep_bank_acct_nbr", false);
+        if (!StringUtils.isBlank(rep_bank_acct_nbr)) {
+            WebUtils.checkStrLength(rep_bank_acct_nbr, 50);
+        }
+        String city_id = WebUtils.getStringValue(request, "city_id", false);
+        if (!StringUtils.isBlank(city_id)) {
+            WebUtils.checkStrLength(city_id, 20);
+        }
+        String rep_gvrnmt_id = WebUtils.getStringValue(request, "rep_gvrnmt_id", false);
+        if (!StringUtils.isBlank(rep_gvrnmt_id)) {
+            WebUtils.checkStrLength(rep_gvrnmt_id, 50);
+        }
+        String rep_bank_city = WebUtils.getStringValue(request, "rep_bank_city", false);
+        if (!StringUtils.isBlank(rep_bank_city)) {
+            WebUtils.checkStrLength(rep_bank_city, 25);
+        }
+        //新增rsp
+        this.storeRspServiceImpl.addRsp(rep_nm, rep_tel, rep_email, last_upd_usr_id,
+                rep_bank_nm, rep_bank_acct_nbr, city_id, rep_gvrnmt_id, rep_bank_city,
+                randomAccessPwd(), stor_id);
+        jsonObject.put("status", CommonUtils.getSubStatus("添加员工成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 随机生成一个六位数的数字
+     *
+     * @return
+     */
+    private static String randomAccessPwd() {
+        String str = "";
+        str += (int) (Math.random() * 9 + 1);
+        for (int i = 0; i < 5; i++) {
+            str += (int) (Math.random() * 10);
+        }
+        return str;
+    }
+
+    /**
+     * 修改店员基本信息
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView modifyRsp(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String rsp_id = WebUtils.getStringValue(request, "rsp_id", true);
+        WebUtils.isInteger(rsp_id);
+        String operate_rsp_id = WebUtils.getStringValue(request, "operate_rsp_id", true);
+        WebUtils.isInteger(operate_rsp_id);
+        String rep_tel = WebUtils.getStringValue(request, "rep_tel", true);
+        WebUtils.checkStrLength(rep_tel, 80);
+        String rep_email = new String(Base64Utils.decode(WebUtils.getStringValue(request, "rep_email", false)), "UTF-8");
+        if (!StringUtils.isBlank(rep_email)) {
+            WebUtils.checkStrLength(rep_email, 80);
+        }
+        //修改rsp
+        this.storeRspServiceImpl.modifyRsp(rep_tel, rep_email, rsp_id, operate_rsp_id);
+        jsonObject.put("status", CommonUtils.getSubStatus("修改成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 删除Rsp
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView deleteRsp(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String rsp_id = WebUtils.getStringValue(request, "rsp_id", true);
+        WebUtils.isInteger(rsp_id);
+        String operate_rsp_id = WebUtils.getStringValue(request, "operate_rsp_id", true);
+        WebUtils.isInteger(operate_rsp_id);
+        this.storeRspServiceImpl.deleteRsp(operate_rsp_id, rsp_id);
+        jsonObject.put("status", CommonUtils.getSubStatus("删除成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 根据Rsp_id查询店长管理查询Rsp
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView listRsp(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        WebUtils.isInteger(stor_id);
+        List<JSONObject> result = this.storeRspServiceImpl.listRsp(stor_id, "2");
+        jsonObject.put("data", result);
+        jsonObject.put("status", CommonUtils.getSubStatus("获取数据成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 查询门店下的店长和店员
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView listAllRsp(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        WebUtils.isInteger(stor_id);
+        List<JSONObject> result = this.storeRspServiceImpl.listRsp(stor_id, "1,2");
+        jsonObject.put("data", result);
+        jsonObject.put("status", CommonUtils.getSubStatus("获取数据成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 根据Rsp查询门店
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView listRspStore(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String rep_id = WebUtils.getStringValue(request, "rep_id", true);
+        WebUtils.isInteger(rep_id);
+        List<SerializableJSONObject> result = this.storeRspServiceImpl.listRspStore(rep_id);
+        jsonObject.put("data", result);
+        jsonObject.put("status", CommonUtils.getSubStatus("获取数据成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 根据sr的Id查询图片日期分类
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView queryPicDateFile(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        WebUtils.isInteger(stor_id);
+        List<JSONObject> result = this.storeRspServiceImpl.queryPicDateFile(stor_id);
+        jsonObject.put("data", result);
+        jsonObject.put("status", CommonUtils.getSubStatus("query queryPicDateFile  successfully!"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 根据日期查询当前日期上传的图片
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView queryPicByDate(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String last_upd_dtm = WebUtils.getStringValue(request, "last_upd_dtm", true);
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        WebUtils.isInteger(stor_id);
+        List<JSONObject> result = this.storeRspServiceImpl.queryPicByDate(last_upd_dtm, stor_id);
+        jsonObject.put("data", result);
+        jsonObject.put("status", CommonUtils.getSubStatus("query queryPicByDate  successfully!"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 新增diy销量数据
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView addDiySaleData(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        WebUtils.isInteger(stor_id);
+        String barcode = WebUtils.getStringValue(request, "barcode", true);
+        WebUtils.checkStrLength(barcode, 200);
+        String rep_id = WebUtils.getStringValue(request, "rep_id", true);
+        WebUtils.isInteger(rep_id);
+        String pic_loc = WebUtils.getStringValue(request, "pic_loc", true);
+        this.storeRspServiceImpl.addDiySaleData(stor_id, barcode, rep_id, pic_loc);
+        jsonObject.put("data", "");
+        jsonObject.put("status", CommonUtils.getSubStatus("addDiySaleData  successfully!"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 新增diy销量数据(新版本使用)
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView newAddDiySaleData(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        try {
+            String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+            WebUtils.isInteger(stor_id);
+            String barcode = WebUtils.getStringValue(request, "barcode", true);
+            WebUtils.checkStrLength(barcode, 200);
+            String rep_id = WebUtils.getStringValue(request, "rep_id", true);
+            WebUtils.isInteger(rep_id);
+            String pic_loc = WebUtils.getStringValue(request, "pic_loc", true);
+            this.storeRspServiceImpl.newAddDiySaleData(stor_id, barcode, rep_id, pic_loc);
+            jsonObject.put("data", "");
+            jsonObject.put("status", CommonUtils.getSubStatus("addDiySaleData  successfully!"));
+            response.getWriter().write(jsonObject.toString());
+            return null;
+        } catch (GenericException e) {
+            if (e.getErrorCode() != null && e.getErrorCode().equals("000002")) {//特殊异常处理，成功后提示用户一些相关信息
+                jsonObject.put("status", CommonUtils.getSubStatus(true, e.getErrorCode(), e.getMsg()));
+                jsonObject.put("data", Arrays.toString(e.getStackTrace()));
+                response.getWriter().write(jsonObject.toString());
+                return null;
+            } else {
+                throw e;
+            }
+        }
+
+    }
+
+    /**
+     * 上传oem销量数据
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView addOemSaleData(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        WebUtils.isInteger(stor_id);
+        String barcode = WebUtils.getStringValue(request, "barcode", true);
+        WebUtils.checkStrLength(barcode, 200);
+        String rep_id = WebUtils.getStringValue(request, "rep_id", true);
+        WebUtils.isInteger(rep_id);
+        String brand_id = WebUtils.getStringValue(request, "brand_id", true);
+        WebUtils.isInteger(brand_id);
+        String mdl_id = WebUtils.getStringValue(request, "mdl_id", true);
+        WebUtils.isInteger(mdl_id);
+        String pic_loc = WebUtils.getStringValue(request, "pic_loc", true);
+        WebUtils.checkStrLength(pic_loc, 200);
+        this.storeRspServiceImpl.addOemSaleData(stor_id, barcode, rep_id, brand_id, mdl_id, pic_loc);
+        jsonObject.put("data", "");
+        jsonObject.put("status", CommonUtils.getSubStatus("addOemSaleData  successfully!"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 根据stor_id查询一月范围内该门店的oem销售数据
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView listOemSaleData(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        WebUtils.isInteger(stor_id);
+        List<JSONObject> data = this.storeRspServiceImpl.listOemSaleData(stor_id);
+        jsonObject.put("data", data);
+        jsonObject.put("status", CommonUtils.getSubStatus("listOemSaleData  successfully!"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 删除oem销量数据
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView deleteOemSaleData(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String id = WebUtils.getStringValue(request, "id", true);
+        WebUtils.isInteger(id);
+        this.storeRspServiceImpl.deleteOemSaleData(id);
+        jsonObject.put("data", "");
+        jsonObject.put("status", CommonUtils.getSubStatus("delete OemSaleData  successfully!"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 根据stor_id查询一月范围内该门店的diy销售数据
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView listDiySaleData(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        WebUtils.isInteger(stor_id);
+        List<JSONObject> data = this.storeRspServiceImpl.listDiySaleData(stor_id);
+        jsonObject.put("data", data);
+        jsonObject.put("status", CommonUtils.getSubStatus("listDiySaleData  successfully!"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 删除diy销量数据
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView deleteDiySaleData(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String id = WebUtils.getStringValue(request, "id", true);
+        WebUtils.isInteger(id);
+        this.storeRspServiceImpl.deleteDiySaleData(id);
+        jsonObject.put("data", "");
+        jsonObject.put("status", CommonUtils.getSubStatus(" deleteDiySaleData  successfully!"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    //qxl 7.28
+
+    /**
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView addRspNew(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String stor_id = WebUtils.getStringValue(request, "stor_id", true);
+        String auth = WebUtils.getStringValue(request, "auth", true);
+        WebUtils.isInteger(stor_id);
+        String rep_nm = new String(Base64Utils.decode(WebUtils.getStringValue(request, "rep_nm", true)), "UTF-8");
+        WebUtils.checkStrLength(rep_nm, 15);
+        String rep_tel = WebUtils.getStringValue(request, "rep_tel", true);
+        WebUtils.checkStrLength(rep_tel, 80);
+        String rep_email = new String(Base64Utils.decode(WebUtils.getStringValue(request, "rep_email", false)), "UTF-8");
+        if (!StringUtils.isBlank(rep_email)) {
+            WebUtils.checkStrLength(rep_email, 80);
+        }
+        String last_upd_usr_id = WebUtils.getStringValue(request, "last_upd_usr_id", true);
+        WebUtils.isInteger(last_upd_usr_id);
+        String rep_bank_nm = WebUtils.getStringValue(request, "rep_bank_nm", false);
+        if (!StringUtils.isBlank(rep_bank_nm)) {
+            WebUtils.checkStrLength(rep_bank_nm, 100);
+        }
+        String rep_bank_acct_nbr = WebUtils.getStringValue(request, "rep_bank_acct_nbr", false);
+        if (!StringUtils.isBlank(rep_bank_acct_nbr)) {
+            WebUtils.checkStrLength(rep_bank_acct_nbr, 50);
+        }
+        String city_id = WebUtils.getStringValue(request, "city_id", false);
+        if (!StringUtils.isBlank(city_id)) {
+            WebUtils.checkStrLength(city_id, 20);
+        }
+        String rep_gvrnmt_id = WebUtils.getStringValue(request, "rep_gvrnmt_id", false);
+        if (!StringUtils.isBlank(rep_gvrnmt_id)) {
+            WebUtils.checkStrLength(rep_gvrnmt_id, 50);
+        }
+        String rep_bank_city = WebUtils.getStringValue(request, "rep_bank_city", false);
+        if (!StringUtils.isBlank(rep_bank_city)) {
+            WebUtils.checkStrLength(rep_bank_city, 25);
+        }
+        //新增rsp
+        this.storeRspServiceImpl.addRspNew(rep_nm, rep_tel, rep_email, last_upd_usr_id,
+                rep_bank_nm, rep_bank_acct_nbr, city_id, rep_gvrnmt_id, rep_bank_city,
+                randomAccessPwd(), stor_id, auth);
+        jsonObject.put("status", CommonUtils.getSubStatus("添加员工成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 修改店员基本信息
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView modifyRspNew(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String rsp_id = WebUtils.getStringValue(request, "rsp_id", true);
+        String auth = WebUtils.getStringValue(request, "auth", true);
+        WebUtils.isInteger(rsp_id);
+        String operate_rsp_id = WebUtils.getStringValue(request, "operate_rsp_id", true);
+        WebUtils.isInteger(operate_rsp_id);
+        String rep_tel = WebUtils.getStringValue(request, "rep_tel", true);
+        WebUtils.checkStrLength(rep_tel, 80);
+        String rep_email = new String(Base64Utils.decode(WebUtils.getStringValue(request, "rep_email", false)), "UTF-8");
+        if (!StringUtils.isBlank(rep_email)) {
+            WebUtils.checkStrLength(rep_email, 80);
+        }
+        //修改rsp
+        this.storeRspServiceImpl.modifyRspNew(rep_tel, rep_email, rsp_id, operate_rsp_id, auth);
+        jsonObject.put("status", CommonUtils.getSubStatus("修改成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+
+    /**
+     * 删除Rsp
+     *
+     * @param request
+     * @param response
+     * @return
+     * @throws Exception
+     */
+    public ModelAndView deleteRspNew(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        JSONObject jsonObject = new JSONObject();
+        String rsp_id = WebUtils.getStringValue(request, "rsp_id", true);
+        WebUtils.isInteger(rsp_id);
+        String operate_rsp_id = WebUtils.getStringValue(request, "operate_rsp_id", true);
+        WebUtils.isInteger(operate_rsp_id);
+        this.storeRspServiceImpl.deleteRspNew(operate_rsp_id, rsp_id);
+        jsonObject.put("status", CommonUtils.getSubStatus("删除成功！"));
+        response.getWriter().write(jsonObject.toString());
+        return null;
+    }
+}
